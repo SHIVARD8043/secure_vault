@@ -81,6 +81,7 @@ class AlbumsScreen extends StatefulWidget {
 class _AlbumsScreenState extends State<AlbumsScreen> {
   List<String> _albums = [];
   Map<String, int> _albumCounts = {};
+  Map<String, String> _albumCovers = {}; // albumName -> thumbnail file path
   int _binCount = 0;
   bool _loading = true;
   String? _selectedAlbum;
@@ -89,6 +90,30 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
   void initState() {
     super.initState();
     _loadAlbums();
+  }
+
+  // ─── ALBUM COVERS (latest item thumbnail per album) ───
+  Future<Map<String, String>> _loadCovers() async {
+    final covers = <String, String>{};
+    try {
+      final db = await DatabaseHelper.instance.database;
+      final rows = await db.query(
+        'vault_items',
+        columns: ['albumName', 'thumbnailPath'],
+        where: "isDeleted = 0 AND type != 'folder' AND thumbnailPath IS NOT NULL AND thumbnailPath != ''",
+        orderBy: 'addedDate DESC',
+      );
+      for (final r in rows) {
+        final album = r['albumName'] as String?;
+        final thumb = r['thumbnailPath'] as String?;
+        if (album == null || thumb == null) continue;
+        // rows are newest first, so first hit per album = latest
+        covers.putIfAbsent(album, () => thumb);
+      }
+    } catch (e) {
+      debugPrint('Cover load error: $e');
+    }
+    return covers;
   }
 
   Future<void> _loadAlbums() async {
@@ -101,9 +126,9 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
       if (item.isDeleted == 1) {
         bin++;
       } else {
-        albumNames.add(item.albumName); 
+        albumNames.add(item.albumName);
 
-        // డమ్మీ ఫోల్డర్ ('folder') ని ఫోటో కౌంట్ లోకి తీసుకోకుండా అడ్డుకుంటున్నాం 
+        // డమ్మీ ఫోల్డర్ ('folder') ని ఫోటో కౌంట్ లోకి తీసుకోకుండా అడ్డుకుంటున్నాం
         if (item.type != 'folder') {
           counts[item.albumName] = (counts[item.albumName] ?? 0) + 1;
         }
@@ -113,10 +138,13 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
     final dbAlbums = await DatabaseHelper.instance.fetchAlbums();
     albumNames.addAll(dbAlbums.map((e) => e['albumName'] as String));
 
+    final covers = await _loadCovers();
+
     if (mounted) {
       setState(() {
         _binCount = bin;
         _albumCounts = counts;
+        _albumCovers = covers;
         _albums = albumNames.toList()..sort();
         _loading = false;
       });
@@ -127,7 +155,7 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
   Future<void> _backup({String? albumName}) async {
     showDialog(context: context, barrierDismissible: false, builder: (_) => const Center(child: CircularProgressIndicator()));
     try {
-      final path = await BackupService().createBackup(albumName: albumName);
+      await BackupService().createBackup(albumName: albumName);
       if (!mounted) return;
       Navigator.pop(context);
       setState(() => _selectedAlbum = null);
@@ -143,14 +171,14 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
   Future<void> _restore() async {
     const XTypeGroup zipTypeGroup = XTypeGroup(label: 'Zip Files', extensions: ['zip']);
     final XFile? file = await openFile(acceptedTypeGroups: [zipTypeGroup]);
-    
+
     if (file == null || !mounted) return;
     final path = file.path;
 
     showDialog(context: context, barrierDismissible: false, builder: (_) => const Center(child: CircularProgressIndicator()));
     try {
       final n = await BackupService().restore(File(path));
-      await File(path).delete().catchError((_) => File(path)); 
+      await File(path).delete().catchError((_) => File(path));
       if (!mounted) return;
       Navigator.pop(context);
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$n photos restored! 🔄')));
@@ -167,7 +195,7 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
     showDialog(context: context, barrierDismissible: false, builder: (_) => const Center(child: CircularProgressIndicator()));
     final allItems = await DatabaseHelper.instance.fetchAll();
     final targetItems = allItems.where((i) => i.albumName == album && i.isDeleted == 0).toList();
-    
+
     if (targetItems.isNotEmpty) {
       await DatabaseHelper.instance.setDeleted(targetItems.map((e) => e.id!).toList(), true);
     }
@@ -188,9 +216,9 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
         title: Text('కొత్త ఆల్బమ్', style: TextStyle(color: p.text, fontWeight: FontWeight.bold)),
         content: TextField(
-          controller: ctrl, 
-          style: TextStyle(color: p.text), 
-          decoration: InputDecoration(hintText: 'ఆల్బమ్ పేరు...', hintStyle: TextStyle(color: p.sub))
+          controller: ctrl,
+          style: TextStyle(color: p.text),
+          decoration: InputDecoration(hintText: 'ఆల్బమ్ పేరు...', hintStyle: TextStyle(color: p.sub)),
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
@@ -202,8 +230,8 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
     if (name != null && name.isNotEmpty) {
       try {
         final db = await DatabaseHelper.instance.database;
-        
-        // ఆల్బమ్ పేరుని నిలబెట్టడానికి ఒక దాచిన 'డమ్మీ' రికార్డ్ వేస్తున్నాం 
+
+        // ఆల్బమ్ పేరుని నిలబెట్టడానికి ఒక దాచిన 'డమ్మీ' రికార్డ్ వేస్తున్నాం
         await db.insert('vault_items', {
           'originalName': 'dummy_folder_$name',
           'encryptedPath': 'dummy', // ఫైల్ పాత్ అక్కర్లేదు
@@ -212,12 +240,11 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
           'albumName': name,
           'addedDate': DateTime.now().toIso8601String(),
           'isDeleted': 0,
-        }); 
-        
+        });
       } catch (e) {
         debugPrint('Album Creation Error: $e');
       }
-      
+
       _loadAlbums();
     }
   }
@@ -249,7 +276,7 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
                                 padding: EdgeInsets.only(top: mq.padding.top + 70, left: 16, right: 16, bottom: 120),
                                 sliver: SliverGrid(
                                   gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                                    crossAxisCount: 2, crossAxisSpacing: 16, mainAxisSpacing: 16, childAspectRatio: 0.85
+                                    crossAxisCount: 2, crossAxisSpacing: 16, mainAxisSpacing: 16, childAspectRatio: 0.85,
                                   ),
                                   delegate: SliverChildBuilderDelegate(
                                     (context, index) {
@@ -258,6 +285,7 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
                                       return _AlbumCard(
                                         name: name,
                                         count: _albumCounts[name] ?? 0,
+                                        cover: _albumCovers[name],
                                         selected: isSelected,
                                         selecting: selecting,
                                         p: p,
@@ -307,8 +335,6 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
                                   const SizedBox(width: 8),
                                   IconButton(icon: Icon(Icons.arrow_back_ios_new_rounded, color: p.text, size: 20), onPressed: () => Navigator.pop(context)),
                                   Expanded(child: Text('Secure Vault', style: TextStyle(color: p.text, fontSize: 20, fontWeight: FontWeight.bold, letterSpacing: -0.5))),
-                                  
-                                  // ఇందాక మనం పెట్టిన కోడ్:
                                   IconButton(
                                     tooltip: 'Recycle Bin',
                                     icon: Badge(
@@ -318,11 +344,9 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
                                       child: Icon(Icons.delete_outline_rounded, color: p.text, size: 24),
                                     ),
                                     onPressed: () {
-                                      // 👈 ఈ కింది లైన్ తో స్నాక్ బార్ తీసేసి నావిగేషన్ పెట్టు
                                       Navigator.push(context, MaterialPageRoute(builder: (_) => const BinScreen())).then((_) => _loadAlbums());
                                     },
                                   ),
-                                  
                                   PopupMenuButton<String>(
                                     icon: Icon(Icons.more_vert_rounded, color: p.text),
                                     color: p.surface,
@@ -372,9 +396,9 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
             ],
           ),
         ),
-        
+
         // ─── FAB (New Album) ───
-        floatingActionButton: !selecting 
+        floatingActionButton: !selecting
             ? ClipRRect(
                 borderRadius: BorderRadius.circular(20),
                 child: BackdropFilter(
@@ -396,9 +420,19 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
 
 // ─── ALBUM CARD WIDGET ───
 class _AlbumCard extends StatelessWidget {
-  const _AlbumCard({required this.name, required this.count, required this.selected, required this.selecting, required this.p, required this.onTap, required this.onLongPress});
+  const _AlbumCard({
+    required this.name,
+    required this.count,
+    required this.cover,
+    required this.selected,
+    required this.selecting,
+    required this.p,
+    required this.onTap,
+    required this.onLongPress,
+  });
   final String name;
   final int count;
+  final String? cover;
   final bool selected;
   final bool selecting;
   final AppPalette p;
@@ -407,6 +441,7 @@ class _AlbumCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final coverPath = cover;
     return GestureDetector(
       onTap: onTap,
       onLongPress: onLongPress,
@@ -424,9 +459,23 @@ class _AlbumCard extends StatelessWidget {
               Expanded(
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(18),
-                  child: ColoredBox(
-                    color: p.surface,
-                    child: Icon(Icons.folder_shared_rounded, size: 60, color: selected ? p.accent : p.accent.withValues(alpha: 0.6)),
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      ColoredBox(
+                        color: p.surface,
+                        child: Icon(Icons.folder_shared_rounded, size: 60, color: selected ? p.accent : p.accent.withValues(alpha: 0.6)),
+                      ),
+                      if (coverPath != null && coverPath.isNotEmpty)
+                        Image.file(
+                          File(coverPath),
+                          fit: BoxFit.cover,
+                          cacheWidth: 400,
+                          gaplessPlayback: true,
+                          errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+                        ),
+                      if (selected) ColoredBox(color: p.accent.withValues(alpha: 0.25)),
+                    ],
                   ),
                 ),
               ),
@@ -445,7 +494,7 @@ class _AlbumCard extends StatelessWidget {
                       ),
                     ),
                     if (selecting)
-                      Icon(selected ? Icons.check_circle_rounded : Icons.radio_button_unchecked_rounded, color: selected ? p.accent : p.sub, size: 22)
+                      Icon(selected ? Icons.check_circle_rounded : Icons.radio_button_unchecked_rounded, color: selected ? p.accent : p.sub, size: 22),
                   ],
                 ),
               ),

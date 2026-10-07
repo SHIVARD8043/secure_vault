@@ -6,6 +6,7 @@ import 'package:intl/intl.dart';
 import 'package:photo_manager/photo_manager.dart';
 import 'package:photo_manager_image_provider/photo_manager_image_provider.dart';
 import 'package:provider/provider.dart';
+import 'package:image_cropper/image_cropper.dart';
 import '../core/theme_provider.dart';
 
 // ─── GLASS WIDGET ───
@@ -134,6 +135,10 @@ class _HomePreviewScreenState extends State<HomePreviewScreen> with SingleTicker
   double _dragY = 0;
   bool _zoomed = false;
 
+  // Immersive mode: top bar + status bar + nav bar hidden on open, single tap toggles them.
+  // Any bottom buttons you add later should also depend on _chrome.
+  bool _chrome = false;
+
   late final AnimationController _snap;
   Animation<double> _snapAnim = const AlwaysStoppedAnimation(0.0);
 
@@ -147,14 +152,23 @@ class _HomePreviewScreenState extends State<HomePreviewScreen> with SingleTicker
     super.initState();
     _snap = AnimationController(vsync: this, duration: const Duration(milliseconds: 260))
       ..addListener(() => setState(() => _dragY = _snapAnim.value));
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     WidgetsBinding.instance.addPostFrameCallback((_) => _precacheAround(_cur));
   }
 
   @override
   void dispose() {
+    _showSystemUi(); // safety net, normally already restored when the pop starts
     _snap.dispose();
     _pc.dispose();
     super.dispose();
+  }
+
+  void _showSystemUi() => SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+
+  void _toggleChrome() {
+    setState(() => _chrome = !_chrome);
+    SystemChrome.setEnabledSystemUIMode(_chrome ? SystemUiMode.edgeToEdge : SystemUiMode.immersiveSticky);
   }
 
   void _precacheAround(int i) {
@@ -170,6 +184,44 @@ class _HomePreviewScreenState extends State<HomePreviewScreen> with SingleTicker
     _snap..reset()..forward();
   }
 
+  Future<void> _crop() async {
+    final asset = widget.items[_cur];
+    final file = await asset.originFile;
+    if (file == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('File not found')));
+      }
+      return;
+    }
+
+    final cropped = await ImageCropper().cropImage(
+      sourcePath: file.path,
+      uiSettings: [
+        AndroidUiSettings(
+          toolbarTitle: 'Crop',
+          toolbarColor: Colors.black,
+          toolbarWidgetColor: Colors.white,
+          backgroundColor: Colors.black,
+          activeControlsWidgetColor: Theme.of(context).colorScheme.primary,
+          lockAspectRatio: false,
+        ),
+        IOSUiSettings(title: 'Crop'),
+      ],
+    );
+    if (cropped == null) return; // user cancelled
+
+    // save as a new image in gallery (original untouched)
+    final saved = await PhotoManager.editor.saveImageWithPath(
+      cropped.path,
+      title: 'crop_${DateTime.now().millisecondsSinceEpoch}.jpg',
+    );
+
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(saved != null ? 'Cropped image saved' : 'Save failed')),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final mq = MediaQuery.of(context);
@@ -177,106 +229,119 @@ class _HomePreviewScreenState extends State<HomePreviewScreen> with SingleTicker
     final cur = widget.items[_cur];
     final fade = (1 - _dragY.abs() / 320).clamp(0.0, 1.0);
     final dp = context.watch<ThemeProvider>().p;
+    final showBar = _chrome && !_zoomed;
 
-    return Scaffold(
-      backgroundColor: Colors.transparent,
-      body: Stack(fit: StackFit.expand, children: [
-        Opacity(
-          opacity: fade,
-          child: Stack(fit: StackFit.expand, children: [
-            const ColoredBox(color: Colors.black),
-            RepaintBoundary(
-              child: AnimatedSwitcher(
-                duration: const Duration(milliseconds: 350),
-                child: SizedBox.expand(
-                  key: ValueKey(cur.id),
-                  child: ImageFiltered(
-                    imageFilter: ImageFilter.blur(sigmaX: 42, sigmaY: 42),
-                    child: Image(image: _thumb(cur), fit: BoxFit.cover, gaplessPlayback: true),
+    return PopScope(
+      // restore status bar as soon as the screen starts closing (back button, swipe-down, arrow)
+      onPopInvokedWithResult: (didPop, _) { if (didPop) _showSystemUi(); },
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        body: Stack(fit: StackFit.expand, children: [
+          Opacity(
+            opacity: fade,
+            child: Stack(fit: StackFit.expand, children: [
+              const ColoredBox(color: Colors.black),
+              RepaintBoundary(
+                child: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 350),
+                  child: SizedBox.expand(
+                    key: ValueKey(cur.id),
+                    child: ImageFiltered(
+                      imageFilter: ImageFilter.blur(sigmaX: 42, sigmaY: 42),
+                      child: Image(image: _thumb(cur), fit: BoxFit.cover, gaplessPlayback: true),
+                    ),
+                  ),
+                ),
+              ),
+              ColoredBox(color: Colors.black.withValues(alpha: 0.5)),
+            ]),
+          ),
+          GestureDetector(
+            onVerticalDragUpdate: _zoomed ? null : (d) => setState(() => _dragY += d.delta.dy),
+            onVerticalDragEnd: _zoomed
+                ? null
+                : (d) {
+                    final v = d.primaryVelocity ?? 0;
+                    if (_dragY.abs() > 120 || v.abs() > 900) Navigator.of(context).pop();
+                    else _animateBack();
+                  },
+            child: Transform.translate(
+              offset: Offset(0, _dragY),
+              child: Transform.scale(
+                scale: 1 - (_dragY.abs() / 1600).clamp(0.0, 0.2),
+                child: PageView.builder(
+                  controller: _pc,
+                  itemCount: n,
+                  physics: _zoomed ? const NeverScrollableScrollPhysics() : const PageScrollPhysics(),
+                  onPageChanged: (i) {
+                    setState(() => _cur = i);
+                    _precacheAround(i);
+                    HapticFeedback.selectionClick();
+                  },
+                  itemBuilder: (_, i) => _ZoomPage(
+                    key: ValueKey(widget.items[i].id), asset: widget.items[i], thumbPx: widget.thumbPx,
+                    onZoom: (z) { if (i == _cur && z != _zoomed) setState(() => _zoomed = z); },
+                    onTap: _toggleChrome,
                   ),
                 ),
               ),
             ),
-            ColoredBox(color: Colors.black.withValues(alpha: 0.5)),
-          ]),
-        ),
-        GestureDetector(
-          onVerticalDragUpdate: _zoomed ? null : (d) => setState(() => _dragY += d.delta.dy),
-          onVerticalDragEnd: _zoomed
-              ? null
-              : (d) {
-                  final v = d.primaryVelocity ?? 0;
-                  if (_dragY.abs() > 120 || v.abs() > 900) Navigator.of(context).pop();
-                  else _animateBack();
-                },
-          child: Transform.translate(
-            offset: Offset(0, _dragY),
-            child: Transform.scale(
-              scale: 1 - (_dragY.abs() / 1600).clamp(0.0, 0.2),
-              child: PageView.builder(
-                controller: _pc,
-                itemCount: n,
-                physics: _zoomed ? const NeverScrollableScrollPhysics() : const PageScrollPhysics(),
-                onPageChanged: (i) {
-                  setState(() => _cur = i);
-                  _precacheAround(i);
-                  HapticFeedback.selectionClick();
-                },
-                itemBuilder: (_, i) => _ZoomPage(
-                  key: ValueKey(widget.items[i].id), asset: widget.items[i], thumbPx: widget.thumbPx,
-                  onZoom: (z) { if (i == _cur && z != _zoomed) setState(() => _zoomed = z); },
-                ),
-              ),
-            ),
           ),
-        ),
-        Positioned(
-          top: 0, left: 0, right: 0,
-          child: AnimatedOpacity(
-            duration: const Duration(milliseconds: 200), opacity: _zoomed ? 0 : fade,
-            child: IgnorePointer(
-              ignoring: _zoomed,
-              child: _Glass(
-                p: dp, radius: 0, blur: 26, border: Border(bottom: BorderSide(color: dp.border)),
-                child: Padding(
-                  padding: EdgeInsets.only(top: mq.padding.top),
-                  child: SizedBox(
-                    height: 56,
-                    child: Row(children: [
-                      IconButton(icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white, size: 20), onPressed: () => Navigator.of(context).pop()),
-                      Expanded(
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(DateFormat('d MMM yyyy').format(cur.createDateTime), style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700)),
-                            Text('${_cur + 1} / $n', style: const TextStyle(color: Colors.white60, fontSize: 12)),
-                          ],
+          Positioned(
+            top: 0, left: 0, right: 0,
+            child: AnimatedOpacity(
+              duration: const Duration(milliseconds: 200), opacity: showBar ? fade : 0,
+              child: IgnorePointer(
+                ignoring: !showBar,
+                child: _Glass(
+                  p: dp, radius: 0, blur: 26, border: Border(bottom: BorderSide(color: dp.border)),
+                  child: Padding(
+                    padding: EdgeInsets.only(top: mq.padding.top),
+                    child: SizedBox(
+                      height: 56,
+                      child: Row(children: [
+                        IconButton(icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white, size: 20), onPressed: () => Navigator.of(context).pop()),
+                        Expanded(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(DateFormat('d MMM yyyy').format(cur.createDateTime), style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700)),
+                              Text('${_cur + 1} / $n', style: const TextStyle(color: Colors.white60, fontSize: 12)),
+                            ],
+                          ),
                         ),
-                      ),
-                      // ─── NEW INFO ICON FOR METADATA ───
-                      IconButton(
-                        tooltip: 'Details',
-                        icon: const Icon(Icons.info_outline_rounded, color: Colors.white),
-                        onPressed: () => _showMeta(context, dp, cur),
-                      ),
-                      const SizedBox(width: 4),
-                    ]),
+                        // ─── CROP ICON ───
+                        IconButton(
+                          tooltip: 'Crop',
+                          icon: const Icon(Icons.crop_rounded, color: Colors.white),
+                          onPressed: _crop,
+                        ),
+                        // ─── INFO ICON FOR METADATA ───
+                        IconButton(
+                          tooltip: 'Details',
+                          icon: const Icon(Icons.info_outline_rounded, color: Colors.white),
+                          onPressed: () => _showMeta(context, dp, cur),
+                        ),
+                        const SizedBox(width: 4),
+                      ]),
+                    ),
                   ),
                 ),
               ),
             ),
           ),
-        ),
-      ]),
+        ]),
+      ),
     );
   }
 }
 
 class _ZoomPage extends StatefulWidget {
-  const _ZoomPage({super.key, required this.asset, required this.thumbPx, required this.onZoom});
+  const _ZoomPage({super.key, required this.asset, required this.thumbPx, required this.onZoom, required this.onTap});
   final AssetEntity asset;
   final int thumbPx;
   final ValueChanged<bool> onZoom;
+  final VoidCallback onTap;
 
   @override
   State<_ZoomPage> createState() => _ZoomPageState();
@@ -333,7 +398,7 @@ class _ZoomPageState extends State<_ZoomPage> with SingleTickerProviderStateMixi
     final big = AssetEntityImageProvider(a, isOriginal: false, thumbnailSize: const ThumbnailSize(1440, 1440));
 
     return GestureDetector(
-      behavior: HitTestBehavior.opaque, onDoubleTapDown: (d) => _tap = d.localPosition, onDoubleTap: _doubleTap,
+      behavior: HitTestBehavior.opaque, onTap: widget.onTap, onDoubleTapDown: (d) => _tap = d.localPosition, onDoubleTap: _doubleTap,
       child: InteractiveViewer(
         transformationController: _tc, minScale: 1, maxScale: 6,
         onInteractionUpdate: (_) => _report(), onInteractionEnd: (_) => _report(),

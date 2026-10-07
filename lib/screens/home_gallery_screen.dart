@@ -9,6 +9,7 @@ import 'package:intl/intl.dart';
 import 'package:photo_manager/photo_manager.dart';
 import 'package:photo_manager_image_provider/photo_manager_image_provider.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../core/vault_service.dart';
 import '../db/database_helper.dart';
 import '../db/vault_queries.dart';
@@ -138,7 +139,7 @@ class _DockBtn extends StatelessWidget {
   }
 }
 
-/// Floating vertical glass dock on the right side (shown while selecting).
+/// Floating horizontal glass dock at the bottom (shown while selecting).
 class _Dock extends StatelessWidget {
   const _Dock({super.key, required this.p, required this.count, required this.onShare, required this.onCopy, required this.onMove, required this.onDelete});
   final _P p;
@@ -149,33 +150,31 @@ class _Dock extends StatelessWidget {
   Widget build(BuildContext context) {
     return DecoratedBox(
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(32),
-        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.28), blurRadius: 28, offset: const Offset(-4, 8))],
+        borderRadius: BorderRadius.circular(30),
+        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.28), blurRadius: 28, offset: const Offset(0, 8))],
       ),
       child: _Glass(
-        p: p, radius: 32, blur: 30,
+        p: p, radius: 30, blur: 30,
         child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 5),
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(14),
-                gradient: LinearGradient(colors: [p.accent, p.accent.withValues(alpha: 0.7)]),
+          padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(14),
+                  gradient: LinearGradient(colors: [p.accent, p.accent.withValues(alpha: 0.7)]),
+                ),
+                child: Text('$count', style: const TextStyle(color: Colors.white, fontSize: 12.5, fontWeight: FontWeight.w800)),
               ),
-              child: Text('$count', style: const TextStyle(color: Colors.white, fontSize: 12.5, fontWeight: FontWeight.w800)),
-            ),
-            const SizedBox(height: 12),
-            _DockBtn(icon: Icons.ios_share_rounded, label: 'Share', color: p.accent, p: p, onTap: onShare),
-            const SizedBox(height: 12),
-            _DockBtn(icon: Icons.copy_rounded, label: 'Copy', color: p.accent, p: p, onTap: onCopy),
-            const SizedBox(height: 12),
-            _DockBtn(icon: Icons.drive_file_move_rounded, label: 'Move', color: p.accent, p: p, onTap: onMove),
-            const SizedBox(height: 10),
-            Container(width: 28, height: 1, color: p.border),
-            const SizedBox(height: 10),
-            _DockBtn(icon: Icons.delete_outline_rounded, label: 'Delete', color: Colors.redAccent, p: p, onTap: onDelete),
-          ]),
+              _DockBtn(icon: Icons.ios_share_rounded, label: 'Share', color: p.accent, p: p, onTap: onShare),
+              _DockBtn(icon: Icons.copy_rounded, label: 'Copy', color: p.accent, p: p, onTap: onCopy),
+              _DockBtn(icon: Icons.drive_file_move_rounded, label: 'Move', color: p.accent, p: p, onTap: onMove),
+              Container(width: 1, height: 36, color: p.border),
+              _DockBtn(icon: Icons.delete_outline_rounded, label: 'Delete', color: Colors.redAccent, p: p, onTap: onDelete),
+            ],
+          ),
         ),
       ),
     );
@@ -327,6 +326,144 @@ class _Tile extends StatelessWidget {
 }
 
 // ════════════════════════════════════════════════════════════════════
+//  TABS: KEEP-ALIVE PAGE, GLASS PILL TABS, ALBUM CARD
+// ════════════════════════════════════════════════════════════════════
+
+/// Keeps a tab page alive so the grid keeps its scroll position.
+class _Keep extends StatefulWidget {
+  const _Keep({required this.child});
+  final Widget child;
+  @override
+  State<_Keep> createState() => _KeepState();
+}
+
+class _KeepState extends State<_Keep> with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    return widget.child;
+  }
+}
+
+/// Glass pill tabs whose indicator follows the swipe.
+class _TabPill extends StatelessWidget {
+  const _TabPill({required this.p, required this.ctrl, required this.labels});
+  final _P p;
+  final TabController ctrl;
+  final List<String> labels;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 38,
+      decoration: BoxDecoration(color: p.glass, borderRadius: BorderRadius.circular(19), border: Border.all(color: p.border)),
+      child: LayoutBuilder(builder: (_, c) {
+        final w = c.maxWidth / 2;
+        return AnimatedBuilder(
+          animation: ctrl.animation!,
+          builder: (_, __) {
+            final v = ctrl.animation!.value;
+            return Stack(children: [
+              Positioned(
+                left: v * w, top: 0, bottom: 0, width: w,
+                child: Padding(
+                  padding: const EdgeInsets.all(3),
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(16),
+                      gradient: LinearGradient(colors: [p.accent, p.accent.withValues(alpha: 0.75)]),
+                    ),
+                  ),
+                ),
+              ),
+              Row(children: [
+                for (var i = 0; i < 2; i++)
+                  Expanded(
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () { HapticFeedback.selectionClick(); ctrl.animateTo(i); },
+                      child: Center(
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                          child: Text(
+                            labels[i], maxLines: 1, overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: Color.lerp(p.sub, Colors.white, (1 - (v - i).abs()).clamp(0.0, 1.0)),
+                              fontSize: 13.5, fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+              ]),
+            ]);
+          },
+        );
+      }),
+    );
+  }
+}
+
+class _AlbumCard extends StatefulWidget {
+  const _AlbumCard({super.key, required this.album, required this.name, required this.count, required this.active, required this.p, required this.onTap});
+  final AssetPathEntity album;
+  final String name;
+  final int count;
+  final bool active;
+  final _P p;
+  final VoidCallback onTap;
+  @override
+  State<_AlbumCard> createState() => _AlbumCardState();
+}
+
+class _AlbumCardState extends State<_AlbumCard> {
+  late final Future<List<AssetEntity>> _cover = widget.album.getAssetListRange(start: 0, end: 1);
+
+  @override
+  Widget build(BuildContext context) {
+    final p = widget.p;
+    return _Press(
+      onTap: widget.onTap,
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Expanded(
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: p.glass, borderRadius: BorderRadius.circular(18),
+              border: Border.all(color: widget.active ? p.accent : p.border, width: widget.active ? 2 : 1),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(2),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(16),
+                child: FutureBuilder<List<AssetEntity>>(
+                  future: _cover,
+                  builder: (_, s) {
+                    final l = s.data;
+                    if (l == null || l.isEmpty) {
+                      return ColoredBox(color: p.surface, child: Center(child: Icon(Icons.photo_library_rounded, color: p.sub)));
+                    }
+                    return Image(
+                      image: AssetEntityImageProvider(l.first, isOriginal: false, thumbnailSize: const ThumbnailSize.square(400)),
+                      fit: BoxFit.cover, width: double.infinity, height: double.infinity, gaplessPlayback: true,
+                    );
+                  },
+                ),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text(widget.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: p.text, fontSize: 15, fontWeight: FontWeight.w700, letterSpacing: -0.2)),
+        Text('${widget.count}', style: TextStyle(color: p.sub, fontSize: 12.5)),
+      ]),
+    );
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════
 //  HOME GALLERY SCREEN
 // ════════════════════════════════════════════════════════════════════
 class HomeGalleryScreen extends StatefulWidget {
@@ -335,9 +472,10 @@ class HomeGalleryScreen extends StatefulWidget {
   State<HomeGalleryScreen> createState() => _HomeGalleryScreenState();
 }
 
-class _HomeGalleryScreenState extends State<HomeGalleryScreen> with SingleTickerProviderStateMixin, WidgetsBindingObserver {
+class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProviderStateMixin, WidgetsBindingObserver {
   static const _pageSize = 120;
   static const _hPad = 4.0, _gap = 3.0, _headerH = 58.0;
+  static const _kGridKey = 'home_grid_cols';
 
   final _scroll = ScrollController();
   final List<AssetEntity> _items = [];
@@ -345,6 +483,9 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with SingleTicker
   final Set<String> _selected = {};
 
   AssetPathEntity? _album;
+  String? _albumId; // currently selected device album id (session only)
+  List<AssetPathEntity> _albums = []; // non-empty device albums
+  final Map<String, int> _albumCounts = {};
   bool _hasMore = true, _loading = false, _ready = false;
   int _gen = 0;
   int _gridColumns = 3;
@@ -352,6 +493,7 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with SingleTicker
   Future<void>? _loadAllFuture;
 
   late final AnimationController _themeCtrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 450));
+  late final TabController _tabs = TabController(length: 2, vsync: this);
   bool _light = false;
   _P get _pal => _P.mix(Curves.easeInOut.transform(_themeCtrl.value));
 
@@ -371,12 +513,13 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with SingleTicker
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _tabs.addListener(() { _tabs.index == 0 ? _scheduleLive() : _stopLive(); });
     _scroll.addListener(() {
       if (_scroll.hasClients && _scroll.position.pixels > _scroll.position.maxScrollExtent - 1200) _loadMore();
     });
-    _reload();
+    _loadPrefs().then((_) => _reload());
 
-    // 👈 యాప్ ఓపెన్ అవ్వగానే, సేవ్ అయిన థీమ్ లోకి మారడానికి
+    // Sync the saved theme as soon as the screen opens
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final isDark = context.read<ThemeProvider>().isDark;
       setState(() {
@@ -386,12 +529,23 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with SingleTicker
     });
   }
 
+  Future<void> _loadPrefs() async {
+    try {
+      final sp = await SharedPreferences.getInstance();
+      final c = sp.getInt(_kGridKey);
+      if (c != null && c >= 2 && c <= 8) _gridColumns = c;
+    } catch (e) {
+      debugPrint('Load prefs failed: $e');
+    }
+  }
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _idleTimer?.cancel();
     _live.dispose();
     _autoTimer?.cancel();
+    _tabs.dispose();
     _themeCtrl.dispose();
     _scroll.dispose();
     super.dispose();
@@ -424,7 +578,7 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with SingleTicker
   /// Picks up to _maxLive visible videos (closest to viewport centre) for loop preview.
   void _updateLive() {
     final L = _layout;
-    if (!mounted || L == null || L.rows.isEmpty || !_scroll.hasClients || _viewH == 0) return;
+    if (!mounted || _tabs.index != 0 || L == null || L.rows.isEmpty || !_scroll.hasClients || _viewH == 0) return;
     final y0 = _scroll.offset, y1 = y0 + _viewH - _topPad, mid = (y0 + y1) / 2;
     var lo = 0, hi = L.rows.length - 1;
     while (lo < hi) {
@@ -451,12 +605,35 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with SingleTicker
     final ps = await PhotoManager.requestPermissionExtend();
     if (!ps.isAuth) { PhotoManager.openSetting(); return; }
     final albums = await PhotoManager.getAssetPathList(
-      type: RequestType.image | RequestType.video, onlyAll: true,
+      type: RequestType.image | RequestType.video,
       filterOption: FilterOptionGroup(orders: [const OrderOption(type: OrderOptionType.createDate, asc: false)]),
     );
     if (!mounted || gen != _gen) return;
-    if (albums.isEmpty) { setState(() => _ready = true); return; }
-    _album = albums.first;
+
+    // drop empty albums, remember counts for the picker
+    final counts = await Future.wait(albums.map((a) => a.assetCountAsync));
+    if (!mounted || gen != _gen) return;
+    final list = <AssetPathEntity>[];
+    final newCounts = <String, int>{};
+    for (var i = 0; i < albums.length; i++) {
+      if (counts[i] > 0) {
+        list.add(albums[i]);
+        newCounts[albums[i].id] = counts[i];
+      }
+    }
+    if (list.isEmpty) {
+      setState(() { _albums = []; _albumCounts.clear(); _items.clear(); _groups.clear(); _layout = null; _ready = true; });
+      return;
+    }
+    list.sort((a, b) => a.isAll ? -1 : (b.isAll ? 1 : a.name.toLowerCase().compareTo(b.name.toLowerCase())));
+    _albums = list;
+    _albumCounts..clear()..addAll(newCounts);
+    _album = list.firstWhere(
+      (a) => a.id == _albumId,
+      orElse: () => list.firstWhere((a) => a.isAll, orElse: () => list.first),
+    );
+    _albumId = _album!.id;
+
     final want = math.max(_pageSize, _items.length);
     final first = await _album!.getAssetListRange(start: 0, end: want);
     if (!mounted || gen != _gen) return;
@@ -627,6 +804,30 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with SingleTicker
     if (mounted) _scheduleLive();
   }
 
+  // ─────────────────────────── ALBUM SWITCHING ───────────────────────────
+  void _switchAlbum(String id) {
+    if (id == _albumId) return;
+    _stopLive();
+    _dragEnd();
+    setState(() {
+      _selected.clear();
+      _albumId = id;
+      _items.clear();
+      _groups.clear();
+      _layout = null;
+      _hasMore = true;
+      _ready = false;
+    });
+    if (_scroll.hasClients) _scroll.jumpTo(0);
+    _reload();
+  }
+
+  /// Tap on an album card: load it and jump back to the photos tab.
+  void _openAlbum(String id) {
+    _switchAlbum(id);
+    _tabs.animateTo(0);
+  }
+
   // ─────────────────────────── ACTIONS ───────────────────────────
   Future<String?> _showAlbumPicker(String title) async {
     final albums = (await DatabaseHelper.instance.fetchAlbums()).map((e) => e['albumName'] as String).toList();
@@ -651,6 +852,28 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with SingleTicker
         ],
       ),
     );
+  }
+
+  // ─── CONFIRMATION DIALOG HELPER ───
+  Future<bool> _showConfirmDialog(String title, String content, String actionText) async {
+    final p = _pal;
+    final res = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: p.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
+        title: Text(title, style: TextStyle(color: p.text, fontWeight: FontWeight.bold)),
+        content: Text(content, style: TextStyle(color: p.sub, fontSize: 14)),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text('Cancel', style: TextStyle(color: p.text))),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(actionText, style: const TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+    return res ?? false;
   }
 
   Future<void> _shareSelected() async {
@@ -695,28 +918,36 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with SingleTicker
   Future<void> _moveSelectedToVault() async {
     final chosen = _items.where((a) => _selected.contains(a.id)).toList();
     if (chosen.isEmpty) return;
+    
     final targetAlbum = await _showAlbumPicker('వాల్ట్ లోకి మార్చు (Move)');
     if (targetAlbum == null || !mounted) return;
 
+    final confirm = await _showConfirmDialog(
+      'Move to Vault',
+      'ఈ ${chosen.length} ఫోటోలను వాల్ట్ లోకి మార్చాలా?',
+      'Move',
+    );
+    if (!confirm || !mounted) return;
+
     showDialog(context: context, barrierDismissible: false, builder: (_) => const Center(child: CircularProgressIndicator()));
+    
     final vault = VaultService();
+    final idsToDelete = <String>[];
     int successCount = 0;
 
     for (final a in chosen) {
       if (await vault.hideAsset(a, targetAlbum)) {
         successCount++;
-        // 👈 ఎలాంటి పర్మిషన్ డైలాగ్ అడగకుండా సైలెంట్ గా డిలీట్ చేస్తున్నాం
-        try {
-          final file = await a.originFile;
-          if (file != null && await file.exists()) {
-            await file.delete(); 
-          }
-        } catch (e) { 
-          debugPrint('Silent delete failed: $e'); 
-        }
+        idsToDelete.add(a.id); // వాల్ట్ లోకి సేఫ్ గా వెళ్ళిన వాటి ఐడీలు మాత్రమే నోట్ చేసుకుంటున్నాం
       }
     }
-    
+
+    // 👈 అసలైన డిలీట్ మ్యాజిక్ ఇక్కడే జరుగుతుంది
+    if (idsToDelete.isNotEmpty) {
+      // ఇది ఆండ్రాయిడ్ ని నేరుగా డిలీట్ చేయమని అడుగుతుంది. (పర్మిషన్ ఇచ్చాక పక్కాగా లేచిపోతాయి)
+      await PhotoManager.editor.deleteWithIds(idsToDelete);
+    }
+
     if (!mounted) return;
     Navigator.pop(context);
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$successCount/${chosen.length} ఫోటోలు $targetAlbum లో లాక్ అయ్యాయి 🔒')));
@@ -728,24 +959,29 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with SingleTicker
     final chosen = _items.where((a) => _selected.contains(a.id)).toList();
     if (chosen.isEmpty) return;
 
+    final confirm = await _showConfirmDialog(
+      'డిలీట్ చేయాలా?',
+      'ఈ ${chosen.length} ఫోటోలు గ్యాలరీ నుండి డిలీట్ అవుతాయి, కానీ Vault Bin లో సేఫ్ గా ఉంటాయి.',
+      'Delete',
+    );
+    if (!confirm || !mounted) return;
+
     showDialog(context: context, barrierDismissible: false, builder: (_) => const Center(child: CircularProgressIndicator()));
+    
     final vault = VaultService();
+    final idsToDelete = <String>[];
     int successCount = 0;
 
     for (final a in chosen) {
-      // trash: true అని పంపితే నేరుగా వాల్ట్ బిన్ లోకి వెళ్తుంది
       if (await vault.hideAsset(a, 'My_Photos', trash: true)) {
         successCount++;
-        // 👈 ఇక్కడ కూడా పర్మిషన్ డైలాగ్ లేకుండా డైరెక్ట్ గా ఫైల్ ని లేపేస్తున్నాం 
-        try {
-          final file = await a.originFile;
-          if (file != null && await file.exists()) {
-            await file.delete(); 
-          }
-        } catch (e) { 
-          debugPrint('Silent delete failed: $e'); 
-        }
+        idsToDelete.add(a.id); // బిన్ లోకి వెళ్ళిన వాటి ఐడీలు నోట్ చేసుకుంటున్నాం
       }
+    }
+
+    // 👈 ఆండ్రాయిడ్ గ్యాలరీలో పక్కాగా డిలీట్ అవ్వడానికి
+    if (idsToDelete.isNotEmpty) {
+      await PhotoManager.editor.deleteWithIds(idsToDelete);
     }
 
     if (!mounted) return;
@@ -757,11 +993,11 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with SingleTicker
 
   void _toggleTheme() {
     HapticFeedback.lightImpact();
-    
-    // 1. ThemeProvider ని పిలిచి డేటాబేస్ (SharedPreferences) లో సేవ్ చేస్తున్నాం
+
+    // 1. Save the choice via ThemeProvider (SharedPreferences)
     context.read<ThemeProvider>().toggleTheme();
 
-    // 2. దాన్ని బట్టి మన హోమ్ స్క్రీన్ యానిమేషన్ రన్ చేస్తున్నాం
+    // 2. Run the local screen animation accordingly
     setState(() => _light = !_light);
     _light ? _themeCtrl.forward() : _themeCtrl.reverse();
   }
@@ -772,40 +1008,49 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with SingleTicker
     final selecting = _selected.isNotEmpty;
 
     return AnimatedBuilder(
-      animation: _themeCtrl,
+      animation: Listenable.merge([_themeCtrl, _tabs]),
       builder: (context, _) {
         final p = _pal;
-        _topPad = mq.padding.top + 56 + 8;
+        _topPad = mq.padding.top + 56 + 46 + 8;
         return AnnotatedRegion<SystemUiOverlayStyle>(
           value: SystemUiOverlayStyle(statusBarColor: Colors.transparent, statusBarIconBrightness: _light ? Brightness.dark : Brightness.light, statusBarBrightness: _light ? Brightness.light : Brightness.dark),
           child: PopScope(
-            canPop: !selecting,
-            onPopInvokedWithResult: (didPop, _) { if (!didPop) setState(_selected.clear); },
+            canPop: !selecting && _tabs.index == 0,
+            onPopInvokedWithResult: (didPop, _) {
+              if (didPop) return;
+              if (selecting) { setState(_selected.clear); } else { _tabs.animateTo(0); }
+            },
             child: Scaffold(
               backgroundColor: p.bg,
               body: DecoratedBox(
                 decoration: BoxDecoration(gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [p.bg, p.bg2])),
                 child: Stack(children: [
-                  Positioned.fill(child: _body(p, selecting, mq)),
+                  Positioned.fill(
+                    child: TabBarView(
+                      controller: _tabs,
+                      physics: selecting ? const NeverScrollableScrollPhysics() : const BouncingScrollPhysics(),
+                      children: [
+                        _Keep(child: _body(p, selecting, mq)),
+                        _Keep(child: _albumsTab(p, mq)),
+                      ],
+                    ),
+                  ),
                   _topBar(p, selecting, mq.padding.top),
 
-                  // ─── RIGHT SIDE DOCK ( Share, Copy, Move, Delete ) ───
+                   // ─── BOTTOM DOCK ( Share, Copy, Move, Delete ) ───
                   Positioned(
-                    right: 10, top: _topPad, bottom: mq.padding.bottom + 24,
-                    child: Align(
-                      alignment: Alignment.centerRight,
-                      child: AnimatedSwitcher(
-                        duration: const Duration(milliseconds: 280), switchInCurve: Curves.easeOutCubic,
-                        transitionBuilder: (c, a) => FadeTransition(opacity: a, child: SlideTransition(position: Tween(begin: const Offset(0.8, 0), end: Offset.zero).animate(a), child: c)),
-                        child: selecting
-                            ? _Dock(
-                                key: const ValueKey('home_dock'),
-                                p: p, count: _selected.length,
-                                onShare: _shareSelected, onCopy: _copySelectedToVault,
-                                onMove: _moveSelectedToVault, onDelete: _binSelected,
-                              )
-                            : const SizedBox.shrink(),
-                      ),
+                    left: 12, right: 12, bottom: mq.padding.bottom + 12,
+                    child: AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 280), switchInCurve: Curves.easeOutCubic,
+                      transitionBuilder: (c, a) => FadeTransition(opacity: a, child: SlideTransition(position: Tween(begin: const Offset(0, 0.8), end: Offset.zero).animate(a), child: c)),
+                      child: selecting
+                          ? _Dock(
+                              key: const ValueKey('home_dock'),
+                              p: p, count: _selected.length,
+                              onShare: _shareSelected, onCopy: _copySelectedToVault,
+                              onMove: _moveSelectedToVault, onDelete: _binSelected,
+                            )
+                          : const SizedBox.shrink(),
                     ),
                   ),
                 ]),
@@ -831,7 +1076,7 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with SingleTicker
           controller: _scroll, physics: const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()), cacheExtent: 1200,
           slivers: [
             SliverPadding(
-              padding: EdgeInsets.only(top: _topPad, bottom: 40 + mq.padding.bottom),
+              padding: EdgeInsets.only(top: _topPad, bottom: (selecting ? 110 : 40) + mq.padding.bottom),
               sliver: SliverVariedExtentList(
                 itemExtentBuilder: (i, _) => L.rows[i].height,
                 delegate: SliverChildBuilderDelegate((ctx, i) => _rowWidget(L.rows[i], L, p, selecting), childCount: L.rows.length, addAutomaticKeepAlives: false),
@@ -842,6 +1087,27 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with SingleTicker
         ),
       );
     });
+  }
+
+  /// Second tab: device albums as cover cards. Tap one to open it in the photos tab.
+  Widget _albumsTab(_P p, MediaQueryData mq) {
+    if (!_ready) return Center(child: CircularProgressIndicator(color: p.accent));
+    if (_albums.isEmpty) return Center(child: Text('No albums', style: TextStyle(color: p.sub, fontSize: 16)));
+    return GridView.builder(
+      physics: const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()),
+      padding: EdgeInsets.fromLTRB(14, _topPad + 6, 14, 40 + mq.padding.bottom),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 2, mainAxisSpacing: 14, crossAxisSpacing: 14, childAspectRatio: 0.86),
+      itemCount: _albums.length,
+      itemBuilder: (_, i) {
+        final a = _albums[i];
+        final n = _albumCounts[a.id] ?? 0;
+        return _AlbumCard(
+          key: ValueKey('${a.id}_$n'),
+          album: a, name: a.isAll ? 'All photos' : a.name, count: n,
+          active: a.id == _albumId, p: p, onTap: () => _openAlbum(a.id),
+        );
+      },
+    );
   }
 
   Widget _rowWidget(_Row r, _Layout L, _P p, bool selecting) {
@@ -873,41 +1139,69 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with SingleTicker
     );
   }
 
-  Widget _topBar(_P p, bool selecting, double inset) {
+    Widget _topBar(_P p, bool selecting, double inset) {
+    final title = (_album == null || _album!.isAll) ? 'All photos' : _album!.name;
     return Positioned(
       top: 0, left: 0, right: 0,
       child: _Glass(
         p: p, radius: 0, blur: 28, border: Border(bottom: BorderSide(color: p.border)),
         child: Padding(
           padding: EdgeInsets.only(top: inset),
-          child: SizedBox(
-            height: 56,
-            child: AnimatedSwitcher(duration: const Duration(milliseconds: 220), child: selecting ? _selectBar(p) : _normalBar(p)),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SizedBox(
+                height: 56,
+                child: AnimatedSwitcher(duration: const Duration(milliseconds: 220), child: selecting ? _selectBar(p) : _normalBar(p)),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
+                child: IgnorePointer(
+                  ignoring: selecting,
+                  child: AnimatedOpacity(
+                    duration: const Duration(milliseconds: 200),
+                    opacity: selecting ? 0.45 : 1,
+                    child: _TabPill(p: p, ctrl: _tabs, labels: [title, 'Albums']),
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ),
     );
   }
 
-  Widget _normalBar(_P p) {
+    Widget _normalBar(_P p) {
     return Row(key: const ValueKey('normal'), children: [
-      const SizedBox(width: 20),
+      const SizedBox(width: 18),
       Expanded(
-        child: Column(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text('Gallery', style: TextStyle(color: p.text, fontSize: 22, fontWeight: FontWeight.w800, letterSpacing: -0.6)),
-            Text('${_items.length}${_hasMore ? '+' : ''} items', style: TextStyle(color: p.sub, fontSize: 12)),
-        ]),
+        child: Text(
+          "Shiva's Gallery",
+          maxLines: 1, overflow: TextOverflow.ellipsis,
+          style: TextStyle(color: p.text, fontSize: 21, fontWeight: FontWeight.w800, letterSpacing: -0.5),
+        ),
       ),
       IconButton(
-        onPressed: _toggleTheme,
+        onPressed: _toggleTheme,        
         icon: AnimatedSwitcher(duration: const Duration(milliseconds: 300), transitionBuilder: (c, a) => RotationTransition(turns: Tween(begin: 0.75, end: 1.0).animate(a), child: FadeTransition(opacity: a, child: c)), child: Icon(_light ? Icons.dark_mode_rounded : Icons.light_mode_rounded, key: ValueKey(_light), color: p.text)),
       ),
       PopupMenuButton<int>(
         icon: Icon(Icons.grid_view_rounded, color: p.text), tooltip: 'Grid size', color: p.surface, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-        onSelected: (v) { setState(() { _gridColumns = v; _layout = null; }); _stopLive(); _scheduleLive(600); },
+        onSelected: (v) async {
+          setState(() { _gridColumns = v; _layout = null; });
+          _stopLive();
+          _scheduleLive(600);
+          try {
+            final sp = await SharedPreferences.getInstance();
+            await sp.setInt(_kGridKey, v);
+          } catch (e) {
+            debugPrint('Save grid failed: $e');
+          }
+        },
         itemBuilder: (_) => [for (int i = 2; i <= 8; i++) PopupMenuItem(value: i, child: Text('$i Columns ${i == 2 ? '(Large)' : i == 8 ? '(Tiny)' : ''}', style: TextStyle(color: i == _gridColumns ? p.accent : p.text, fontWeight: i == _gridColumns ? FontWeight.w700 : FontWeight.w500)))],
       ),
-      IconButton(icon: Icon(Icons.security_rounded, color: p.text), onPressed: () async { _stopLive(); await Navigator.push(context, MaterialPageRoute(builder: (_) => const AlbumsScreen())); _scheduleLive(); }),
+      IconButton(icon: Icon(Icons.security_rounded, color: p.text), onPressed: () async { _stopLive(); await Navigator.push(context, MaterialPageRoute(builder: (_) => const AlbumsScreen())); if (_tabs.index == 0) _scheduleLive(); }),
       const SizedBox(width: 4),
     ]);
   }

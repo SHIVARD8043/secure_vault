@@ -328,6 +328,96 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
       _loadItems();
     }
   }
+  // ── ALBUM PROPERTIES (INFO) ──
+  Future<void> _showAlbumStats(BuildContext context, AppPalette p) {
+    return showModalBottomSheet<void>(
+      context: context, backgroundColor: p.surface, isScrollControlled: true,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
+      builder: (_) => FutureBuilder<Map<String, String>>(
+        future: () async {
+          int pCount = 0, vCount = 0, pSize = 0, vSize = 0;
+          for (final item in _items) {
+            final f = File(item.encryptedPath);
+            int size = 0;
+            if (await f.exists()) size = (await f.stat()).size;
+            
+            if (item.type == 'video') {
+              vCount++;
+              vSize += size;
+            } else {
+              pCount++;
+              pSize += size;
+            }
+          }
+          return {
+            'Photos': '$pCount items  •  ${_fmtSize(pSize)}',
+            'Videos': '$vCount items  •  ${_fmtSize(vSize)}',
+            'Total Size': _fmtSize(pSize + vSize),
+          };
+        }(),
+        builder: (ctx, snap) {
+          final m = snap.data;
+          return SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(24, 24, 24, 32),
+              child: m == null
+                  ? SizedBox(height: 160, child: Center(child: CircularProgressIndicator(color: p.accent)))
+                  : Column(mainAxisSize: MainAxisSize.min, children: [
+                      Text('${widget.albumName} Info', style: TextStyle(color: p.text, fontSize: 20, fontWeight: FontWeight.w800)),
+                      const SizedBox(height: 20),
+                      for (final e in m.entries)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 10),
+                          child: Row(children: [
+                            Icon(
+                              e.key == 'Photos' ? Icons.image_outlined : e.key == 'Videos' ? Icons.play_circle_outline : Icons.storage_rounded, 
+                              color: p.accent, size: 24
+                            ),
+                            const SizedBox(width: 12),
+                            SizedBox(width: 100, child: Text(e.key, style: TextStyle(color: p.sub, fontSize: 15, fontWeight: FontWeight.w600))),
+                            Expanded(child: Text(e.value, style: TextStyle(color: p.text, fontSize: 16, fontWeight: FontWeight.w700), textAlign: TextAlign.right)),
+                          ]),
+                        ),
+                    ]),
+            ),
+          );
+        },
+      ),
+    );
+  }
+  // ── RESTORE TO ORIGINAL GALLERY ──
+  Future<void> _restoreToGallery() async {
+    final chosen = _items.where((i) => _selected.contains(i.id)).toList();
+    if (chosen.isEmpty) return;
+
+    // పొరపాటున నొక్కకుండా కన్ఫర్మేషన్ అడుగుతున్నాం
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) {
+        final p = context.read<ThemeProvider>().p;
+        return AlertDialog(
+          backgroundColor: p.surface, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
+          title: Text('Unhide Photos?', style: TextStyle(color: p.text, fontWeight: FontWeight.bold)),
+          content: Text('ఈ ${chosen.length} ఐటెమ్స్ మళ్ళీ మీ ఫోన్ పబ్లిక్ గ్యాలరీలోకి వెళ్లిపోతాయి. కన్ఫర్మ్ చేయాలా?', style: TextStyle(color: p.sub)),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text('Cancel', style: TextStyle(color: p.text))),
+            TextButton(onPressed: () => Navigator.pop(ctx, true), child: Text('Unhide', style: TextStyle(color: p.accent, fontWeight: FontWeight.bold))),
+          ],
+        );
+      },
+    );
+
+    if (confirm != true || !mounted) return;
+
+    // VaultService లోని ఎక్స్‌పోర్ట్ ఫంక్షన్ ని కాల్ చేస్తున్నాం 
+    await _withProgress(context, () => VaultService().exportToGallery(chosen));
+    
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${chosen.length} items restored to gallery 🔓')));
+      setState(() => _selected.clear());
+      _loadItems();
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -446,13 +536,20 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
                               const SizedBox(width: 8),
                             ],
                           )
+                        // ఈ కింది విధంగా మార్చు
                         : Row(
                             children: [
                               const SizedBox(width: 8),
                               IconButton(icon: Icon(Icons.arrow_back_ios_new_rounded, color: p.text, size: 20), onPressed: () => Navigator.pop(context)),
                               Expanded(child: Text(widget.albumName, style: TextStyle(color: p.text, fontSize: 20, fontWeight: FontWeight.bold))),
-                              Text('${_items.length} Items', style: TextStyle(color: p.sub, fontSize: 14)),
-                              const SizedBox(width: 16),
+                              
+                              // 👈 ఇక్కడ కొత్తగా Info బటన్ యాడ్ చేశాం 
+                              IconButton(
+                                tooltip: 'Album Info',
+                                icon: Icon(Icons.info_outline_rounded, color: p.accent), 
+                                onPressed: () => _showAlbumStats(context, p)
+                              ),
+                              const SizedBox(width: 8),
                             ],
                           ),
                   ),
@@ -476,6 +573,7 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
                           mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                           children: [
                             _ActionBtn(icon: Icons.ios_share_rounded, label: 'Share', color: p.accent, onTap: _shareSelected),
+                            _ActionBtn(icon: Icons.output_rounded, label: 'Unhide', color: p.accent, onTap: _restoreToGallery),
                             _ActionBtn(icon: Icons.copy_rounded, label: 'Copy', color: p.accent, onTap: () => _copySelected(p)),
                             _ActionBtn(icon: Icons.drive_file_move_rounded, label: 'Move', color: p.accent, onTap: () => _moveSelected(p)),
                             _ActionBtn(icon: Icons.delete_outline_rounded, label: 'Bin', color: Colors.redAccent, onTap: _trashSelected),
