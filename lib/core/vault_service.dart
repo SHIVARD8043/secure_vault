@@ -18,9 +18,8 @@ class VaultService {
     return d;
   }
 
-  /// Copies original + saves a small thumbnail. Returns true ONLY if the copy is verified,
-  /// so the caller can safely delete the original.
-  Future<bool> hideAsset(AssetEntity asset, String album) async {
+  // ఇక్కడ కొత్తగా {bool trash = false} అని యాడ్ చేశాం 
+  Future<bool> hideAsset(AssetEntity asset, String album, {bool trash = false}) async {
     try {
       final src = await asset.originFile;
       if (src == null) return false;
@@ -30,13 +29,12 @@ class VaultService {
       final id = '${DateTime.now().microsecondsSinceEpoch}_${_rand.nextInt(9999)}';
       final dest = p.join(media.path, '$id${p.extension(src.path)}');
 
-      await src.copy(dest);
+      await src.copy(dest); 
       if (await File(dest).length() != await src.length()) {
         await File(dest).delete();
         return false;
       }
 
-      // Native thumbnail (fast) - this is what makes the grid smooth
       String? thumbPath;
       final bytes = await asset.thumbnailDataWithSize(const ThumbnailSize(400, 400), quality: 80);
       if (bytes != null) {
@@ -48,10 +46,11 @@ class VaultService {
         originalName: p.basename(src.path),
         encryptedPath: dest,
         thumbnailPath: thumbPath,
-        type: 'image',
+        type: asset.type == AssetType.video ? 'video' : 'image',
         albumName: album,
         addedDate: asset.createDateTime.toIso8601String(),
-        isDeleted: 0,
+        // 👈 ఇక్కడ డైరెక్ట్ గా కండిషన్ పెట్టేశాం 
+        isDeleted: trash ? 1 : 0, 
       );
       await DatabaseHelper.instance.insertItem(item.toMap());
       return true;
@@ -72,10 +71,14 @@ class VaultService {
     await DatabaseHelper.instance.removeRows(items.map((e) => e.id!).toList());
   }
 
-  /// Puts the photo back in the phone gallery, then removes it from the vault.
+  /// Puts the photo/video back in the phone gallery, then removes it from the vault.
   Future<void> exportToGallery(List<VaultItem> items, {bool removeFromVault = true}) async {
     for (final i in items) {
-      await PhotoManager.editor.saveImageWithPath(i.encryptedPath, title: i.originalName);
+      if (i.type == 'video') {
+        await PhotoManager.editor.saveVideo(File(i.encryptedPath), title: i.originalName);
+      } else {
+        await PhotoManager.editor.saveImageWithPath(i.encryptedPath, title: i.originalName);
+      }
     }
     if (removeFromVault) await deleteForever(items);
   }

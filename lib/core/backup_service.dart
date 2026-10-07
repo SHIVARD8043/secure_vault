@@ -16,8 +16,15 @@ class BackupService {
     return d;
   }
 
-  Future<File> createBackup({void Function(int done, int total)? onProgress}) async {
-    final items = await DatabaseHelper.instance.fetchAll();
+  Future<File> createBackup({String? albumName, void Function(int done, int total)? onProgress}) async {
+    // 1. Data motham fetch chestunnam
+    final allItems = await DatabaseHelper.instance.fetchAll();
+    
+    // 2. Okavela albumName isthe, aa album photos matrame filter chestunnam
+    final items = albumName != null 
+        ? allItems.where((i) => i.albumName == albumName).toList()
+        : allItems;
+
     final tmp = await getTemporaryDirectory();
     final stamp = DateTime.now().toIso8601String().split('.').first.replaceAll(':', '-');
     final zip = File(p.join(tmp.path, 'vault_backup_$stamp.zip'));

@@ -4,17 +4,15 @@ import 'dart:ui' show ImageFilter;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
-import 'package:collection/collection.dart';
 import 'package:photo_view/photo_view.dart';
 import 'package:photo_view/photo_view_gallery.dart';
 import 'package:share_plus/share_plus.dart';
-import 'package:provider/provider.dart'; // NEW: Theme Provider
+import 'package:provider/provider.dart';
 import '../core/theme_provider.dart';
 import '../core/vault_service.dart';
 import '../db/database_helper.dart';
 import '../db/vault_item_model.dart';
-import 'video_player_screen.dart'; // NEW: Video Player
-
+import 'video_player_screen.dart';
 
 // ════════════════════════════════════════════════════════════════════
 //  GLASS WIDGET & SHARED BUTTON
@@ -75,52 +73,19 @@ class _ActionBtn extends StatelessWidget {
 // ════════════════════════════════════════════════════════════════════
 //  HELPERS & METADATA
 // ════════════════════════════════════════════════════════════════════
-Future<bool> _copyItem(dynamic db, VaultItem it, String album) async {
-  final src = File(it.encryptedPath);
-  if (!await src.exists()) return false;
-  final dot = it.encryptedPath.lastIndexOf('.');
-  final slash = it.encryptedPath.lastIndexOf(RegExp(r'[\\/]'));
-  final hasExt = dot > slash;
-  final base = hasExt ? it.encryptedPath.substring(0, dot) : it.encryptedPath;
-  final ext = hasExt ? it.encryptedPath.substring(dot) : '';
-  final newPath = '${base}_copy_${DateTime.now().microsecondsSinceEpoch}$ext';
-  await src.copy(newPath);
-  try {
-    final rows = await db.query('vault_items', where: 'id = ?', whereArgs: [it.id]);
-    if (rows.isEmpty) throw StateError('row missing');
-    final row = Map<String, Object?>.from(rows.first as Map)
-      ..remove('id')
-      ..['albumName'] = album
-      ..['encryptedPath'] = newPath;
-    await db.insert('vault_items', row);
-    return true;
-  } catch (_) {
-    try { await File(newPath).delete(); } catch (_) {}
-    return false;
-  }
-}
-
 Future<T> _withProgress<T>(BuildContext context, Future<T> Function() job) async {
-  showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => const Center(child: CircularProgressIndicator()));
-  try {
-    return await job();
-  } finally {
-    if (context.mounted) Navigator.of(context).pop();
-  }
+  showDialog(context: context, barrierDismissible: false, builder: (_) => const Center(child: CircularProgressIndicator()));
+  try { return await job(); } finally { if (context.mounted) Navigator.of(context).pop(); }
 }
 
-Future<String?> _pickAlbum(BuildContext context, String title, AppPalette p, {String? exclude}) async {
-  final albums = (await DatabaseHelper.instance.fetchAlbums()).map((e) => e['albumName'] as String).where((a) => a != exclude).toList();
+Future<String?> _pickAlbum(BuildContext context, String title, AppPalette p) async {
+  final albums = (await DatabaseHelper.instance.fetchAlbums()).map((e) => e['albumName'] as String).toList();
   if (!context.mounted) return null;
   final ctrl = TextEditingController();
   return showDialog<String>(
     context: context,
     builder: (ctx) => AlertDialog(
-      backgroundColor: p.surface,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
+      backgroundColor: p.surface, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
       title: Text(title, style: TextStyle(color: p.text, fontWeight: FontWeight.bold)),
       content: SizedBox(
         width: double.maxFinite,
@@ -144,6 +109,32 @@ Future<String?> _pickAlbum(BuildContext context, String title, AppPalette p, {St
   );
 }
 
+Future<bool> _copyItem(dynamic db, VaultItem it, String album) async {
+  final src = File(it.encryptedPath);
+  if (!await src.exists()) return false;
+  final dot = it.encryptedPath.lastIndexOf('.');
+  final slash = it.encryptedPath.lastIndexOf(RegExp(r'[\\/]'));
+  final hasExt = dot > slash;
+  final base = hasExt ? it.encryptedPath.substring(0, dot) : it.encryptedPath;
+  final ext = hasExt ? it.encryptedPath.substring(dot) : '';
+  final newPath = '${base}_copy_${DateTime.now().microsecondsSinceEpoch}$ext';
+  await src.copy(newPath);
+  try {
+    final rows = await db.query('vault_items', where: 'id = ?', whereArgs: [it.id]);
+    if (rows.isEmpty) throw StateError('row missing');
+    final row = Map<String, Object?>.from(rows.first as Map)
+      ..remove('id')
+      ..['albumName'] = album
+      ..['isDeleted'] = 0 // కాపీ చేసిన ఫైల్ బిన్ లో ఉండకూడదు కదా!
+      ..['encryptedPath'] = newPath;
+    await db.insert('vault_items', row);
+    return true;
+  } catch (_) {
+    try { await File(newPath).delete(); } catch (_) {}
+    return false;
+  }
+}
+
 DateTime? _dateOf(VaultItem item) {
   try { if (item.addedDate != null) return DateTime.tryParse(item.addedDate.toString()); } catch (_) {}
   return null;
@@ -164,6 +155,7 @@ Future<Map<String, String>> _loadMeta(VaultItem item) async {
   final added = _dateOf(item);
   out['Added'] = added == null ? '-' : DateFormat('EEE, d MMM yyyy • h:mm a').format(added);
   out['Album'] = item.albumName;
+  out['Status'] = 'In Recycle Bin 🗑️';
   if (await f.exists()) {
     final st = await f.stat();
     out['Modified'] = DateFormat('d MMM yyyy • h:mm a').format(st.modified);
@@ -179,7 +171,6 @@ Future<Map<String, String>> _loadMeta(VaultItem item) async {
   } else {
     out['Size'] = 'File missing';
   }
-  out['Path'] = item.encryptedPath;
   return out;
 }
 
@@ -195,7 +186,7 @@ Future<void> _showMeta(BuildContext context, AppPalette p, VaultItem item) {
           child: Padding(
             padding: const EdgeInsets.fromLTRB(22, 18, 22, 18),
             child: m == null
-                ? const SizedBox(height: 160, child: Center(child: CircularProgressIndicator()))
+                ? SizedBox(height: 160, child: Center(child: CircularProgressIndicator(color: p.accent)))
                 : SingleChildScrollView(
                     child: Column(mainAxisSize: MainAxisSize.min, children: [
                       Text('Details', style: TextStyle(color: p.text, fontSize: 18, fontWeight: FontWeight.w800)),
@@ -218,71 +209,79 @@ Future<void> _showMeta(BuildContext context, AppPalette p, VaultItem item) {
 }
 
 // ════════════════════════════════════════════════════════════════════
-//  1. ALBUM VIEW SCREEN (Vault Items Grid)
+//  BIN SCREEN (Grid)
 // ════════════════════════════════════════════════════════════════════
-class AlbumViewScreen extends StatefulWidget {
-  final String albumName;
-  const AlbumViewScreen({super.key, required this.albumName});
+class BinScreen extends StatefulWidget {
+  const BinScreen({super.key});
   @override
-  State<AlbumViewScreen> createState() => _AlbumViewScreenState();
+  State<BinScreen> createState() => _BinScreenState();
 }
 
-class _AlbumViewScreenState extends State<AlbumViewScreen> {
+class _BinScreenState extends State<BinScreen> {
   List<VaultItem> _items = [];
-  Map<String, List<VaultItem>> _groupedItems = {};
-  final Set<int> _selected = {}; 
+  final Set<int> _selected = {};
   bool _loading = true;
 
   @override
   void initState() {
     super.initState();
-    _loadItems();
+    _loadBinItems();
   }
 
-  Future<void> _loadItems() async {
+  Future<void> _loadBinItems() async {
     final allItems = await DatabaseHelper.instance.fetchAll();
-    
-    // ── ముఖ్యమైన మార్పు: డమ్మీ ఫోల్డర్లని (type: 'folder') హైడ్ చేస్తున్నాం ──
-    final albumItems = allItems.where((i) => 
-      i.albumName == widget.albumName && 
-      i.isDeleted == 0 &&
-      i.type != 'folder' 
-    ).toList();
-
     if (mounted) {
       setState(() {
-        _items = albumItems;
-        _groupItems();
+        _items = allItems.where((i) => i.isDeleted == 1).toList();
         _loading = false;
       });
     }
   }
 
-  void _groupItems() {
-    _groupedItems = groupBy(_items, (VaultItem item) {
-      DateTime date = DateTime.now();
-      try { if (item.addedDate != null) date = DateTime.tryParse(item.addedDate.toString()) ?? DateTime.now(); } catch (_) {}
-      final now = DateTime.now(), today = DateTime(now.year, now.month, now.day), yesterday = today.subtract(const Duration(days: 1));
-      final itemDate = DateTime(date.year, date.month, date.day);
-      if (itemDate == today) return "ఈరోజు (Today)";
-      if (itemDate == yesterday) return "నిన్న (Yesterday)";
-      if (date.year == now.year) return DateFormat('MMMM d').format(date);
-      return DateFormat('MMMM yyyy').format(date);
-    });
-  }
-
   void _toggle(VaultItem a) => setState(() { _selected.contains(a.id) ? _selected.remove(a.id) : _selected.add(a.id!); });
 
-  // ── BOTTOM BAR ACTIONS ──
-  Future<void> _shareSelected() async {
-    final chosen = _items.where((i) => _selected.contains(i.id)).toList();
-    final files = [for (final i in chosen) if (File(i.encryptedPath).existsSync()) XFile(i.encryptedPath)];
-    if (files.isNotEmpty) {
-      await Share.shareXFiles(files);
+  Future<void> _restoreSelected() async {
+    await _withProgress(context, () => DatabaseHelper.instance.setDeleted(_selected.toList(), false));
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${_selected.length} items restored! ♻️')));
       setState(() => _selected.clear());
+      _loadBinItems();
     }
   }
 
+  Future<void> _deleteForeverSelected() async {
+    final bool? confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) {
+        final p = context.watch<ThemeProvider>().p;
+        return AlertDialog(
+          backgroundColor: p.surface, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
+          title: Text('శాశ్వతంగా తొలగించాలా?', style: TextStyle(color: p.text, fontWeight: FontWeight.bold)),
+          content: Text('ఈ ${_selected.length} ఐటెమ్స్ మళ్లీ తిరిగి రావు. ఖచ్చితంగా డిలీట్ చేయాలా?', style: TextStyle(color: p.sub)),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text('Cancel', style: TextStyle(color: p.text))),
+            TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Delete', style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold))),
+          ],
+        );
+      },
+    );
+
+    if (confirm != true || !mounted) return;
+    await _withProgress(context, () => VaultService().deleteForever(_items.where((i) => _selected.contains(i.id)).toList()));
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Items permanently deleted 🗑️')));
+      setState(() => _selected.clear());
+      _loadBinItems();
+    }
+  }
+
+  Future<void> _emptyBin() async {
+    if (_items.isEmpty) return;
+    setState(() { _selected.clear(); _selected.addAll(_items.map((e) => e.id!)); });
+    await _deleteForeverSelected();
+  }
+
+  // ── NEW: Move & Copy for Bin ──
   Future<void> _copySelected(AppPalette p) async {
     final target = await _pickAlbum(context, 'Copy to', p);
     if (target == null || !mounted) return;
@@ -296,36 +295,28 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$ok/${chosen.length} copied to $target 📄')));
       setState(() => _selected.clear());
-      _loadItems();
+      _loadBinItems();
     }
   }
 
   Future<void> _moveSelected(AppPalette p) async {
-    final target = await _pickAlbum(context, 'Move to', p, exclude: widget.albumName);
+    final target = await _pickAlbum(context, 'Restore to Album', p);
     if (target == null || !mounted) return;
     final chosen = _items.where((i) => _selected.contains(i.id)).toList();
     final ok = await _withProgress(context, () async {
       final db = await DatabaseHelper.instance.database;
       var n = 0;
       for (final it in chosen) {
-        await db.update('vault_items', {'albumName': target}, where: 'id = ?', whereArgs: [it.id]);
+        // Move కొడితే ఆల్బమ్ పేరు మారిపోయి, isDeleted కూడా 0 అయిపోయి రీస్టోర్ అయిపోతుంది
+        await db.update('vault_items', {'albumName': target, 'isDeleted': 0}, where: 'id = ?', whereArgs: [it.id]);
         n++;
       }
       return n;
     });
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$ok/${chosen.length} moved to $target 🚀')));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$ok/${chosen.length} restored to $target 🚀')));
       setState(() => _selected.clear());
-      _loadItems();
-    }
-  }
-
-  Future<void> _trashSelected() async {
-    await _withProgress(context, () => DatabaseHelper.instance.setDeleted(_selected.toList(), true));
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${_selected.length} items moved to bin 🗑️')));
-      setState(() => _selected.clear());
-      _loadItems();
+      _loadBinItems();
     }
   }
 
@@ -345,86 +336,59 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
               child: _loading
                   ? Center(child: CircularProgressIndicator(color: p.accent))
                   : _items.isEmpty
-                      ? Center(child: Text('ఆల్బమ్ ఖాళీగా ఉంది', style: TextStyle(color: p.sub, fontSize: 16)))
-                      : CustomScrollView(
+                      ? Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.delete_outline_rounded, size: 64, color: p.sub.withValues(alpha: 0.5)),
+                              const SizedBox(height: 16),
+                              Text('ట్రాష్ ఖాళీగా ఉంది', style: TextStyle(color: p.sub, fontSize: 16)),
+                            ],
+                          ),
+                        )
+                      : GridView.builder(
                           physics: const BouncingScrollPhysics(),
-                          slivers: [
-                            SliverPadding(padding: EdgeInsets.only(top: mq.padding.top + 60)), 
-                            ..._groupedItems.entries.expand((entry) {
-                              final dateHeader = entry.key;
-                              final itemsInGroup = entry.value;
+                          padding: EdgeInsets.only(top: mq.padding.top + 70, left: 2, right: 2, bottom: 120),
+                          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 3, crossAxisSpacing: 2, mainAxisSpacing: 2),
+                          itemCount: _items.length,
+                          itemBuilder: (context, index) {
+                            final item = _items[index];
+                            final sel = _selected.contains(item.id);
+                            final isVideo = item.type == 'video';
+                            final imgPath = (isVideo && item.thumbnailPath != null) ? item.thumbnailPath! : item.encryptedPath;
+                            final file = File(imgPath);
 
-                              return [
-                                SliverToBoxAdapter(
-                                  child: Padding(
-                                    padding: const EdgeInsets.only(left: 16, right: 16, top: 16, bottom: 8),
-                                    child: Text(dateHeader, style: TextStyle(color: p.text, fontSize: 15, fontWeight: FontWeight.bold)),
+                            return GestureDetector(
+                              onTap: () async {
+                                if (selecting) {
+                                  _toggle(item);
+                                } else {
+                                  if (isVideo) {
+                                    await Navigator.push(context, MaterialPageRoute(builder: (_) => VideoPlayerScreen(file: File(item.encryptedPath), title: item.originalName)));
+                                  } else {
+                                    final imgItems = _items.where((e) => e.type != 'video').toList();
+                                    final idx = imgItems.indexWhere((e) => e.id == item.id);
+                                    if (idx != -1) {
+                                      final changed = await Navigator.push(context, MaterialPageRoute(builder: (_) => BinPreviewScreen(items: imgItems, initialIndex: idx)));
+                                      if (changed == true) _loadBinItems();
+                                    }
+                                  }
+                                }
+                              },
+                              onLongPress: () { HapticFeedback.mediumImpact(); _toggle(item); },
+                              child: Stack(
+                                fit: StackFit.expand, 
+                                children: [
+                                  Hero(
+                                    tag: 'bin_${item.id}',
+                                    child: file.existsSync() ? Image.file(file, fit: BoxFit.cover) : Container(color: p.bg2, child: Icon(Icons.broken_image, color: p.sub)),
                                   ),
-                                ),
-                                SliverPadding(
-                                  padding: const EdgeInsets.symmetric(horizontal: 2),
-                                  sliver: SliverGrid(
-                                    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                                      crossAxisCount: 3, crossAxisSpacing: 2, mainAxisSpacing: 2
-                                    ),
-                                    delegate: SliverChildBuilderDelegate(
-                                      (context, index) {
-                                        final item = itemsInGroup[index];
-                                        final sel = _selected.contains(item.id);
-                                        final isVideo = item.type == 'video';
-                                        
-                                        // ── వీడియో అయితే థంబ్‌నెయిల్, ఫోటో అయితే ఒరిజినల్ ఫైల్ తీసుకుంటున్నాం ──
-                                        final imgPath = (isVideo && item.thumbnailPath != null) ? item.thumbnailPath! : item.encryptedPath;
-                                        final file = File(imgPath);
-
-                                        return GestureDetector(
-                                          onTap: () async {
-                                            if (selecting) {
-                                              _toggle(item);
-                                            } else {
-                                              if (isVideo) {
-                                                // వీడియోని సపరేట్ వీడియో ప్లేయర్ కి పంపుతున్నాం
-                                                await Navigator.push(context, MaterialPageRoute(builder: (_) => VideoPlayerScreen(file: File(item.encryptedPath), title: item.originalName)));
-                                              } else {
-                                                // PhotoViewGallery లో వీడియోలు క్రాష్ అవుతాయి కాబట్టి వాటిని ఫిల్టర్ చేసి పంపుతున్నాం 
-                                                final imgItems = _items.where((e) => e.type != 'video').toList();
-                                                final idx = imgItems.indexWhere((e) => e.id == item.id);
-                                                if (idx != -1) {
-                                                  final changed = await Navigator.push(context, MaterialPageRoute(builder: (_) => PhotoPreviewScreen(items: imgItems, initialIndex: idx, albumName: widget.albumName)));
-                                                  if (changed == true) _loadItems();
-                                                }
-                                              }
-                                            }
-                                          },
-                                          onLongPress: () { HapticFeedback.mediumImpact(); _toggle(item); },
-                                          child: Stack(fit: StackFit.expand, children: [
-                                            Hero(
-                                              tag: 'vault_${item.id}',
-                                              child: file.existsSync()
-                                                  ? Image.file(file, fit: BoxFit.cover)
-                                                  : Container(color: p.bg2, child: Icon(Icons.broken_image, color: p.sub)),
-                                            ),
-                                            
-                                            // వీడియో అయితే పైన ప్లే బటన్ కనపడాలి
-                                            if (isVideo)
-                                              const Center(child: Icon(Icons.play_circle_fill_rounded, color: Colors.white, size: 36, shadows: [Shadow(color: Colors.black54, blurRadius: 4)])),
-                                              
-                                            if (sel)
-                                              Container(
-                                                color: p.accent.withValues(alpha: 0.4), alignment: Alignment.bottomRight, padding: const EdgeInsets.all(4),
-                                                child: const Icon(Icons.check_circle, color: Colors.white),
-                                              ),
-                                          ]),
-                                        );
-                                      },
-                                      childCount: itemsInGroup.length,
-                                    ),
-                                  ),
-                                ),
-                              ];
-                            }),
-                            const SliverPadding(padding: EdgeInsets.only(bottom: 120)), 
-                          ],
+                                  if (isVideo) const Center(child: Icon(Icons.play_circle_fill_rounded, color: Colors.white, size: 28, shadows: [Shadow(color: Colors.black54, blurRadius: 4)])),
+                                  if (sel) Container(color: p.accent.withValues(alpha: 0.4), alignment: Alignment.bottomRight, padding: const EdgeInsets.all(4), child: const Icon(Icons.check_circle, color: Colors.white)),
+                                ],
+                              ),
+                            );
+                          },
                         ),
             ),
 
@@ -450,9 +414,10 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
                             children: [
                               const SizedBox(width: 8),
                               IconButton(icon: Icon(Icons.arrow_back_ios_new_rounded, color: p.text, size: 20), onPressed: () => Navigator.pop(context)),
-                              Expanded(child: Text(widget.albumName, style: TextStyle(color: p.text, fontSize: 20, fontWeight: FontWeight.bold))),
-                              Text('${_items.length} Items', style: TextStyle(color: p.sub, fontSize: 14)),
-                              const SizedBox(width: 16),
+                              Expanded(child: Text('Recycle Bin', style: TextStyle(color: p.text, fontSize: 20, fontWeight: FontWeight.bold))),
+                              if (_items.isNotEmpty)
+                                TextButton(onPressed: _emptyBin, child: const Text('Empty', style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold))),
+                              const SizedBox(width: 8),
                             ],
                           ),
                   ),
@@ -468,17 +433,17 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
                 transitionBuilder: (c, a) => FadeTransition(opacity: a, child: SlideTransition(position: Tween(begin: const Offset(0, 0.6), end: Offset.zero).animate(a), child: c)),
                 child: selecting 
                   ? _Glass(
-                      key: const ValueKey('vault_actions_bar'),
+                      key: const ValueKey('bin_actions_bar'),
                       p: p, radius: 28, blur: 26,
                       child: Padding(
                         padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
                         child: Row(
                           mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                           children: [
-                            _ActionBtn(icon: Icons.ios_share_rounded, label: 'Share', color: p.accent, onTap: _shareSelected),
-                            _ActionBtn(icon: Icons.copy_rounded, label: 'Copy', color: p.accent, onTap: () => _copySelected(p)),
+                            _ActionBtn(icon: Icons.restore_rounded, label: 'Restore', color: p.accent, onTap: _restoreSelected),
                             _ActionBtn(icon: Icons.drive_file_move_rounded, label: 'Move', color: p.accent, onTap: () => _moveSelected(p)),
-                            _ActionBtn(icon: Icons.delete_outline_rounded, label: 'Bin', color: Colors.redAccent, onTap: _trashSelected),
+                            _ActionBtn(icon: Icons.copy_rounded, label: 'Copy', color: p.accent, onTap: () => _copySelected(p)),
+                            _ActionBtn(icon: Icons.delete_forever_rounded, label: 'Delete', color: Colors.redAccent, onTap: _deleteForeverSelected),
                           ],
                         ),
                       ),
@@ -494,21 +459,17 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
 }
 
 // ════════════════════════════════════════════════════════════════════
-//  2. PHOTO PREVIEW SCREEN (Vault Image Viewer)
+//  BIN PREVIEW SCREEN
 // ════════════════════════════════════════════════════════════════════
-class PhotoPreviewScreen extends StatefulWidget {
+class BinPreviewScreen extends StatefulWidget {
   final List<VaultItem> items;
   final int initialIndex;
-  final bool trash;
-  final String? albumName; 
-  const PhotoPreviewScreen({
-    super.key, required this.items, required this.initialIndex, this.trash = false, this.albumName,
-  });
+  const BinPreviewScreen({super.key, required this.items, required this.initialIndex});
   @override
-  State<PhotoPreviewScreen> createState() => _PhotoPreviewScreenState();
+  State<BinPreviewScreen> createState() => _BinPreviewScreenState();
 }
 
-class _PhotoPreviewScreenState extends State<PhotoPreviewScreen> {
+class _BinPreviewScreenState extends State<BinPreviewScreen> {
   late final PageController _pc = PageController(initialPage: widget.initialIndex);
   late int _index = widget.initialIndex;
   bool _chrome = true;
@@ -529,7 +490,7 @@ class _PhotoPreviewScreenState extends State<PhotoPreviewScreen> {
           const SizedBox(height: 12),
           ListTile(leading: Icon(Icons.ios_share_rounded, color: p.accent), title: Text('Share', style: TextStyle(color: p.text)), onTap: () => Navigator.pop(context, 'share')),
           ListTile(leading: Icon(Icons.copy_rounded, color: p.accent), title: Text('Copy to Album', style: TextStyle(color: p.text)), onTap: () => Navigator.pop(context, 'copy')),
-          ListTile(leading: Icon(Icons.drive_file_move_rounded, color: p.accent), title: Text('Move to Album', style: TextStyle(color: p.text)), onTap: () => Navigator.pop(context, 'move')),
+          ListTile(leading: Icon(Icons.drive_file_move_rounded, color: p.accent), title: Text('Restore to Album (Move)', style: TextStyle(color: p.text)), onTap: () => Navigator.pop(context, 'move')),
           const SizedBox(height: 12),
         ]),
       ),
@@ -544,10 +505,10 @@ class _PhotoPreviewScreenState extends State<PhotoPreviewScreen> {
         if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Copied to $target ✅')));
       }
     } else if (act == 'move' && mounted) {
-      final target = await _pickAlbum(context, 'Move to', p, exclude: widget.albumName ?? _cur.albumName);
+      final target = await _pickAlbum(context, 'Restore to Album', p);
       if (target != null) {
         final db = await DatabaseHelper.instance.database;
-        await _withProgress(context, () => db.update('vault_items', {'albumName': target}, where: 'id = ?', whereArgs: [_cur.id]));
+        await _withProgress(context, () => db.update('vault_items', {'albumName': target, 'isDeleted': 0}, where: 'id = ?', whereArgs: [_cur.id]));
         if (mounted) Navigator.pop(context, true); 
       }
     }
@@ -575,7 +536,7 @@ class _PhotoPreviewScreenState extends State<PhotoPreviewScreen> {
                 final item = widget.items[i];
                 return PhotoViewGalleryPageOptions(
                   imageProvider: ResizeImage.resizeIfNeeded(2400, null, FileImage(File(item.encryptedPath))),
-                  heroAttributes: PhotoViewHeroAttributes(tag: 'vault_${item.id}'),
+                  heroAttributes: PhotoViewHeroAttributes(tag: 'bin_${item.id}'),
                   minScale: PhotoViewComputedScale.contained,
                   maxScale: PhotoViewComputedScale.covered * 3,
                 );
@@ -601,7 +562,7 @@ class _PhotoPreviewScreenState extends State<PhotoPreviewScreen> {
                           IconButton(icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white, size: 20), onPressed: () => Navigator.pop(context)),
                           Expanded(child: Text('${_index + 1} / ${widget.items.length}', style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold))),
                           IconButton(tooltip: 'Details', icon: const Icon(Icons.info_outline_rounded, color: Colors.white), onPressed: () => _showMeta(context, p, _cur)),
-                          if (!widget.trash) IconButton(tooltip: 'More', icon: const Icon(Icons.more_vert_rounded, color: Colors.white), onPressed: () => _showPreviewActions(p)),
+                          IconButton(tooltip: 'More', icon: const Icon(Icons.more_vert_rounded, color: Colors.white), onPressed: () => _showPreviewActions(p)),
                           const SizedBox(width: 4),
                         ],
                       ),
@@ -612,7 +573,7 @@ class _PhotoPreviewScreenState extends State<PhotoPreviewScreen> {
             ),
           ),
 
-          // Bottom Bar
+          // Bottom Bar (Restore / Delete Forever)
           Positioned(
             bottom: 0, left: 0, right: 0,
             child: AnimatedOpacity(
@@ -627,12 +588,9 @@ class _PhotoPreviewScreenState extends State<PhotoPreviewScreen> {
                       height: 80,
                       child: Row(
                         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                        children: widget.trash ? [
+                        children: [
                           _ActionBtn(icon: Icons.restore_rounded, label: 'Restore', color: p.accent, onTap: () => _act(() => DatabaseHelper.instance.setDeleted([_cur.id!], false))),
-                          _ActionBtn(icon: Icons.delete_forever_rounded, label: 'Delete', color: Colors.redAccent, onTap: () => _act(() => VaultService().deleteForever([_cur]))),
-                        ] : [
-                          _ActionBtn(icon: Icons.output_rounded, label: 'Export', color: p.accent, onTap: () => _act(() => VaultService().exportToGallery([_cur]))),
-                          _ActionBtn(icon: Icons.delete_outline_rounded, label: 'Trash', color: Colors.redAccent, onTap: () => _act(() => DatabaseHelper.instance.setDeleted([_cur.id!], true))),
+                          _ActionBtn(icon: Icons.delete_forever_rounded, label: 'Delete Forever', color: Colors.redAccent, onTap: () => _act(() => VaultService().deleteForever([_cur]))),
                         ],
                       ),
                     ),
