@@ -19,6 +19,7 @@ import 'video_loop_preview.dart';
 import 'video_player_screen.dart';
 import 'package:provider/provider.dart';
 import '../core/theme_provider.dart';
+import 'device_album_screen.dart'; // 👈 కొత్తగా క్రియేట్ చేసిన ఫైల్
 
 // ════════════════════════════════════════════════════════════════════
 //  PALETTE, GLASS WIDGET & SHARED BUTTONS
@@ -497,6 +498,9 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
   bool _light = false;
   _P get _pal => _P.mix(Curves.easeInOut.transform(_themeCtrl.value));
 
+  // true when the photos tab was opened by tapping an album card (so Back returns to Albums tab)
+  bool _fromAlbums = false;
+
   bool _dragActive = false, _dragSelect = true;
   int _anchor = 0, _lastIdx = -1;
   Set<String> _dragBase = {};
@@ -513,7 +517,10 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _tabs.addListener(() { _tabs.index == 0 ? _scheduleLive() : _stopLive(); });
+    _tabs.addListener(() {
+      if (_tabs.index == 1) _fromAlbums = false; // user manually went to Albums tab -> reset
+      _tabs.index == 0 ? _scheduleLive() : _stopLive();
+    });
     _scroll.addListener(() {
       if (_scroll.hasClients && _scroll.position.pixels > _scroll.position.maxScrollExtent - 1200) _loadMore();
     });
@@ -822,10 +829,16 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     _reload();
   }
 
-  /// Tap on an album card: load it and jump back to the photos tab.
+  /// Tap on an album card: opens the new DeviceAlbumScreen without changing tabs
   void _openAlbum(String id) {
-    _switchAlbum(id);
-    _tabs.animateTo(0);
+    final albumEntity = _albums.firstWhere((a) => a.id == id);
+    final albumName = albumEntity.isAll ? 'All photos' : albumEntity.name;
+    
+    // జంప్ అవ్వకుండా డైరెక్ట్ గా సపరేట్ స్క్రీన్ ఓపెన్ చేస్తున్నాం
+    Navigator.push(
+      context, 
+      MaterialPageRoute(builder: (_) => DeviceAlbumScreen(album: albumEntity, albumName: albumName))
+    );
   }
 
   // ─────────────────────────── ACTIONS ───────────────────────────
@@ -918,7 +931,7 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
   Future<void> _moveSelectedToVault() async {
     final chosen = _items.where((a) => _selected.contains(a.id)).toList();
     if (chosen.isEmpty) return;
-    
+
     final targetAlbum = await _showAlbumPicker('వాల్ట్ లోకి మార్చు (Move)');
     if (targetAlbum == null || !mounted) return;
 
@@ -930,7 +943,7 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     if (!confirm || !mounted) return;
 
     showDialog(context: context, barrierDismissible: false, builder: (_) => const Center(child: CircularProgressIndicator()));
-    
+
     final vault = VaultService();
     final idsToDelete = <String>[];
     int successCount = 0;
@@ -967,7 +980,7 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     if (!confirm || !mounted) return;
 
     showDialog(context: context, barrierDismissible: false, builder: (_) => const Center(child: CircularProgressIndicator()));
-    
+
     final vault = VaultService();
     final idsToDelete = <String>[];
     int successCount = 0;
@@ -1015,10 +1028,18 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
         return AnnotatedRegion<SystemUiOverlayStyle>(
           value: SystemUiOverlayStyle(statusBarColor: Colors.transparent, statusBarIconBrightness: _light ? Brightness.dark : Brightness.light, statusBarBrightness: _light ? Brightness.light : Brightness.dark),
           child: PopScope(
-            canPop: !selecting && _tabs.index == 0,
+            canPop: !selecting && _tabs.index == 0 && !_fromAlbums,
             onPopInvokedWithResult: (didPop, _) {
               if (didPop) return;
-              if (selecting) { setState(_selected.clear); } else { _tabs.animateTo(0); }
+              if (selecting) {
+                setState(_selected.clear);
+              } else if (_fromAlbums) {
+                // came from an album card -> Back goes to the Albums tab
+                setState(() => _fromAlbums = false);
+                _tabs.animateTo(1);
+              } else {
+                _tabs.animateTo(0);
+              }
             },
             child: Scaffold(
               backgroundColor: p.bg,
@@ -1037,7 +1058,7 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
                   ),
                   _topBar(p, selecting, mq.padding.top),
 
-                   // ─── BOTTOM DOCK ( Share, Copy, Move, Delete ) ───
+                  // ─── BOTTOM DOCK ( Share, Copy, Move, Delete ) ───
                   Positioned(
                     left: 12, right: 12, bottom: mq.padding.bottom + 12,
                     child: AnimatedSwitcher(
@@ -1073,17 +1094,17 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
         child: NotificationListener<ScrollNotification>(
           onNotification: _onScrollNote,
           child: CustomScrollView(
-          controller: _scroll, physics: const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()), cacheExtent: 1200,
-          slivers: [
-            SliverPadding(
-              padding: EdgeInsets.only(top: _topPad, bottom: (selecting ? 110 : 40) + mq.padding.bottom),
-              sliver: SliverVariedExtentList(
-                itemExtentBuilder: (i, _) => L.rows[i].height,
-                delegate: SliverChildBuilderDelegate((ctx, i) => _rowWidget(L.rows[i], L, p, selecting), childCount: L.rows.length, addAutomaticKeepAlives: false),
+            controller: _scroll, physics: const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()), cacheExtent: 1200,
+            slivers: [
+              SliverPadding(
+                padding: EdgeInsets.only(top: _topPad, bottom: (selecting ? 110 : 40) + mq.padding.bottom),
+                sliver: SliverVariedExtentList(
+                  itemExtentBuilder: (i, _) => L.rows[i].height,
+                  delegate: SliverChildBuilderDelegate((ctx, i) => _rowWidget(L.rows[i], L, p, selecting), childCount: L.rows.length, addAutomaticKeepAlives: false),
+                ),
               ),
-            ),
-          ],
-        ),
+            ],
+          ),
         ),
       );
     });
@@ -1133,13 +1154,13 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     return Padding(
       padding: const EdgeInsets.fromLTRB(18, 0, 18, 8),
       child: Align(alignment: Alignment.bottomLeft, child: Row(children: [
-          Expanded(child: Text(g.label, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: p.text, fontSize: 17, fontWeight: FontWeight.w700, letterSpacing: -0.3))),
-          _Check(on: all, p: p, overlay: false),
+        Expanded(child: Text(g.label, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: p.text, fontSize: 17, fontWeight: FontWeight.w700, letterSpacing: -0.3))),
+        _Check(on: all, p: p, overlay: false),
       ])),
     );
   }
 
-    Widget _topBar(_P p, bool selecting, double inset) {
+  Widget _topBar(_P p, bool selecting, double inset) {
     final title = (_album == null || _album!.isAll) ? 'All photos' : _album!.name;
     return Positioned(
       top: 0, left: 0, right: 0,
@@ -1172,40 +1193,28 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     );
   }
 
-    Widget _normalBar(_P p) {
+  Widget _normalBar(_P p) {
     return Row(key: const ValueKey('normal'), children: [
       const SizedBox(width: 18),
       Expanded(
-        child: Text(
-          "Shiva's Gallery",
-          maxLines: 1, overflow: TextOverflow.ellipsis,
-          style: TextStyle(color: p.text, fontSize: 21, fontWeight: FontWeight.w800, letterSpacing: -0.5),
+        // 👈 సీక్రెట్ ఎంట్రీ మ్యాజిక్ ఇక్కడే ఉంది!
+        child: GestureDetector(
+          onTap: _openVaultSecurely, 
+          child: Text(
+            "Shiva's Gallery",
+            maxLines: 1, overflow: TextOverflow.ellipsis,
+            style: TextStyle(color: p.text, fontSize: 21, fontWeight: FontWeight.w800, letterSpacing: -0.5),
+          ),
         ),
       ),
+      // 👈 పాత 3 ఐకాన్స్ తీసేసి, ఒకే సింగిల్ 'Settings' బటన్ పెట్టాం
       IconButton(
-        onPressed: _toggleTheme,        
-        icon: AnimatedSwitcher(duration: const Duration(milliseconds: 300), transitionBuilder: (c, a) => RotationTransition(turns: Tween(begin: 0.75, end: 1.0).animate(a), child: FadeTransition(opacity: a, child: c)), child: Icon(_light ? Icons.dark_mode_rounded : Icons.light_mode_rounded, key: ValueKey(_light), color: p.text)),
+        icon: Icon(Icons.settings_rounded, color: p.text),
+        onPressed: () => _showSettings(context, p),
       ),
-      PopupMenuButton<int>(
-        icon: Icon(Icons.grid_view_rounded, color: p.text), tooltip: 'Grid size', color: p.surface, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-        onSelected: (v) async {
-          setState(() { _gridColumns = v; _layout = null; });
-          _stopLive();
-          _scheduleLive(600);
-          try {
-            final sp = await SharedPreferences.getInstance();
-            await sp.setInt(_kGridKey, v);
-          } catch (e) {
-            debugPrint('Save grid failed: $e');
-          }
-        },
-        itemBuilder: (_) => [for (int i = 2; i <= 8; i++) PopupMenuItem(value: i, child: Text('$i Columns ${i == 2 ? '(Large)' : i == 8 ? '(Tiny)' : ''}', style: TextStyle(color: i == _gridColumns ? p.accent : p.text, fontWeight: i == _gridColumns ? FontWeight.w700 : FontWeight.w500)))],
-      ),
-      IconButton(icon: Icon(Icons.security_rounded, color: p.text), onPressed: () async { _stopLive(); await Navigator.push(context, MaterialPageRoute(builder: (_) => const AlbumsScreen())); if (_tabs.index == 0) _scheduleLive(); }),
       const SizedBox(width: 4),
     ]);
   }
-
   Widget _selectBar(_P p) {
     return Row(key: const ValueKey('select'), children: [
       IconButton(icon: Icon(Icons.close_rounded, color: p.text), onPressed: () => setState(_selected.clear)),
@@ -1213,5 +1222,237 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
       IconButton(icon: Icon(Icons.select_all_rounded, color: p.text), onPressed: () => _sel(() => _selected.length == _items.length ? _selected.clear() : _selected.addAll(_items.map((e) => e.id)))),
       const SizedBox(width: 4),
     ]);
+  }
+  // ─── 1. SECRET VAULT LOCK (Alphanumeric) ───
+  Future<void> _openVaultSecurely() async {
+    HapticFeedback.heavyImpact(); // Tap cheyagane haptic feel
+    final sp = await SharedPreferences.getInstance();
+    // 'vault_secret_key' ani kotha peru pettam
+    final storedKey = sp.getString('vault_secret_key'); 
+    final p = _pal;
+    final ctrl = TextEditingController();
+    String error = '';
+
+    final res = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          return AlertDialog(
+            backgroundColor: p.surface,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+            title: Text(
+              storedKey == null ? 'Set Secret Key' : 'Enter Secret Key', 
+              style: TextStyle(color: p.text, fontWeight: FontWeight.bold), 
+              textAlign: TextAlign.center
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: ctrl,
+                  keyboardType: TextInputType.text, // 👈 Alphanumeric kosam text pettam
+                  obscureText: true,
+                  autofocus: true,
+                  style: TextStyle(color: p.accent, fontSize: 24, letterSpacing: 4, fontWeight: FontWeight.bold),
+                  textAlign: TextAlign.center,
+                  decoration: InputDecoration(
+                    hintText: 'A-Z, 0-9 allowed',
+                    hintStyle: TextStyle(color: p.sub.withValues(alpha: 0.5), fontSize: 13, letterSpacing: 0),
+                    enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: p.border)),
+                    focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: p.accent, width: 2)),
+                  ),
+                  onChanged: (v) {
+                    if (error.isNotEmpty) setDialogState(() => error = '');
+                  },
+                ),
+                if (error.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  Text(error, style: const TextStyle(color: Colors.redAccent, fontSize: 13, fontWeight: FontWeight.bold)),
+                ]
+              ],
+            ),
+            actionsAlignment: MainAxisAlignment.spaceEvenly,
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false), 
+                child: Text('Cancel', style: TextStyle(color: p.sub))
+              ),
+              TextButton(
+                onPressed: () async {
+                  final val = ctrl.text.trim();
+                  // Minimum 6 characters rule pettam (Security kosam)
+                  if (val.length < 6) {
+                    setDialogState(() => error = 'Minimum 6 characters required');
+                    return;
+                  }
+                  
+                  if (storedKey == null) {
+                    await sp.setString('vault_secret_key', val); // First time key set chestunnam
+                    Navigator.pop(ctx, true);
+                  } else {
+                    if (val == storedKey) {
+                      Navigator.pop(ctx, true); // Correct key
+                    } else {
+                      setDialogState(() => error = 'Incorrect Key ❌');
+                    }
+                  }
+                },
+                child: Text(
+                  storedKey == null ? 'Set Key' : 'Unlock', 
+                  style: TextStyle(color: p.accent, fontWeight: FontWeight.bold, fontSize: 16)
+                ),
+              ),
+            ],
+          );
+        }
+      )
+    );
+
+    // Key correct aithe Vault open avtundi
+    if (res == true && mounted) {
+      _stopLive();
+      await Navigator.push(context, MaterialPageRoute(builder: (_) => const AlbumsScreen()));
+      if (_tabs.index == 0) _scheduleLive();
+    }
+  }
+
+  // ─── 2. SETTINGS MENU ───
+  void _showSettings(BuildContext context, _P p) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: p.surface,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setModalState) {
+          return SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(24, 24, 24, 32),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Settings', style: TextStyle(color: p.text, fontSize: 24, fontWeight: FontWeight.w800)),
+                  const SizedBox(height: 24),
+                  
+                  // Theme Toggle
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(_light ? Icons.light_mode_rounded : Icons.dark_mode_rounded, color: p.accent, size: 28),
+                    title: Text('Dark / Light Theme', style: TextStyle(color: p.text, fontSize: 16, fontWeight: FontWeight.w600)),
+                    trailing: Switch(
+                      value: !_light,
+                      activeColor: p.accent,
+                      onChanged: (v) {
+                        _toggleTheme();
+                        setModalState(() {}); // మోడల్ లోపల UI అప్‌డేట్ అవ్వడానికి
+                      },
+                    ),
+                  ),
+                  
+                  // Grid Size
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(Icons.grid_view_rounded, color: p.accent, size: 28),
+                    title: Text('Grid Columns', style: TextStyle(color: p.text, fontSize: 16, fontWeight: FontWeight.w600)),
+                    trailing: DropdownButton<int>(
+                      dropdownColor: p.surface,
+                      value: _gridColumns,
+                      underline: const SizedBox(),
+                      style: TextStyle(color: p.accent, fontWeight: FontWeight.w800, fontSize: 18),
+                      items: [for (int i = 2; i <= 8; i++) DropdownMenuItem(value: i, child: Text('$i'))],
+                      onChanged: (v) async {
+                        if (v != null) {
+                          setState(() { _gridColumns = v; _layout = null; });
+                          _stopLive(); _scheduleLive(600);
+                          final sp = await SharedPreferences.getInstance();
+                          await sp.setInt(_kGridKey, v);
+                          Navigator.pop(ctx);
+                        }
+                      },
+                    ),
+                  ),
+
+                  const Divider(height: 36),
+
+                  // Statistics
+                  Text('Storage Statistics', style: TextStyle(color: p.sub, fontSize: 13, fontWeight: FontWeight.w700, letterSpacing: 0.5)),
+                  const SizedBox(height: 16),
+                  FutureBuilder<Map<String, String>>(
+                    future: _getStats(),
+                    builder: (ctx, snap) {
+                      if (!snap.hasData) return const Padding(padding: EdgeInsets.symmetric(vertical: 20), child: Center(child: CircularProgressIndicator()));
+                      final stats = snap.data!;
+                      return Container(
+                        padding: const EdgeInsets.all(16),
+                        decoration: BoxDecoration(color: p.glass, borderRadius: BorderRadius.circular(16), border: Border.all(color: p.border)),
+                        child: Column(
+                          children: [
+                            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                              Text('📱 Phone Gallery', style: TextStyle(color: p.text, fontWeight: FontWeight.w600)),
+                              Text(stats['phone']!, style: TextStyle(color: p.accent, fontWeight: FontWeight.w800)),
+                            ]),
+                            const SizedBox(height: 12),
+                            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                              Text('🔒 Secure Vault', style: TextStyle(color: p.text, fontWeight: FontWeight.w600)),
+                              Text(stats['vault']!, style: TextStyle(color: Colors.green, fontWeight: FontWeight.w800)),
+                            ]),
+                          ],
+                        ),
+                      );
+                    }
+                  ),
+
+                  const Divider(height: 42),
+
+                  // About Section
+                  Center(
+                    child: Column(
+                      children: [
+                        Text('Vault Gallery v1.0.0', style: TextStyle(color: p.text, fontSize: 15, fontWeight: FontWeight.w800)),
+                        const SizedBox(height: 6),
+                        Text('Created by Shiva ❤️', style: TextStyle(color: p.sub, fontSize: 13, fontWeight: FontWeight.w600)),
+                      ],
+                    ),
+                  )
+                ],
+              ),
+            ),
+          );
+        }
+      )
+    );
+  }
+
+  // ─── 3. STATS CALCULATOR ───
+  Future<Map<String, String>> _getStats() async {
+    // 1. Vault Data Size
+    int vaultBytes = 0;
+    int vaultCount = 0;
+    final vaultItems = await DatabaseHelper.instance.fetchAll();
+    for (var item in vaultItems) {
+      final f = File(item.encryptedPath);
+      if (await f.exists()) {
+        vaultBytes += await f.length();
+        vaultCount++;
+      }
+    }
+
+    // 2. Phone Gallery Size
+    int phoneCount = _items.length; // ప్రస్తుతం లోడ్ అయిన ఫోటోలు
+    
+    // Size Format Helper
+    String fmt(int b) {
+      if (b == 0) return '0 B';
+      final u = ['B', 'KB', 'MB', 'GB'];
+      var v = b.toDouble(), i = 0;
+      while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+      return '${v.toStringAsFixed(1)} ${u[i]}';
+    }
+
+    return {
+      'vault': '$vaultCount Items  •  ${fmt(vaultBytes)}',
+      'phone': '$phoneCount Items Total',
+    };
   }
 }

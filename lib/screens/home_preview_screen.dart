@@ -43,7 +43,7 @@ HeroFlightShuttleBuilder _shuttle(ImageProvider img) {
           final r = lerpDouble(11, 0, Curves.easeOut.transform(t.clamp(0.0, 1.0)))!;
           return ClipRRect(
             borderRadius: BorderRadius.circular(r),
-            child: Image(image: img, fit: BoxFit.cover, gaplessPlayback: true),
+            child: Image(image: img, fit: BoxFit.contain, gaplessPlayback: true), // 👈 మార్పు: BoxFit.cover నుండి contain కి మార్చాం
           );
         },
       );
@@ -134,9 +134,6 @@ class _HomePreviewScreenState extends State<HomePreviewScreen> with SingleTicker
   late int _cur = widget.initial;
   double _dragY = 0;
   bool _zoomed = false;
-
-  // Immersive mode: top bar + status bar + nav bar hidden on open, single tap toggles them.
-  // Any bottom buttons you add later should also depend on _chrome.
   bool _chrome = false;
 
   late final AnimationController _snap;
@@ -158,7 +155,7 @@ class _HomePreviewScreenState extends State<HomePreviewScreen> with SingleTicker
 
   @override
   void dispose() {
-    _showSystemUi(); // safety net, normally already restored when the pop starts
+    _showSystemUi();
     _snap.dispose();
     _pc.dispose();
     super.dispose();
@@ -188,9 +185,7 @@ class _HomePreviewScreenState extends State<HomePreviewScreen> with SingleTicker
     final asset = widget.items[_cur];
     final file = await asset.originFile;
     if (file == null) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('File not found')));
-      }
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('File not found')));
       return;
     }
 
@@ -208,18 +203,12 @@ class _HomePreviewScreenState extends State<HomePreviewScreen> with SingleTicker
         IOSUiSettings(title: 'Crop'),
       ],
     );
-    if (cropped == null) return; // user cancelled
+    if (cropped == null) return; 
 
-    // save as a new image in gallery (original untouched)
-    final saved = await PhotoManager.editor.saveImageWithPath(
-      cropped.path,
-      title: 'crop_${DateTime.now().millisecondsSinceEpoch}.jpg',
-    );
+    final saved = await PhotoManager.editor.saveImageWithPath(cropped.path, title: 'crop_${DateTime.now().millisecondsSinceEpoch}.jpg');
 
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(saved != null ? 'Cropped image saved' : 'Save failed')),
-    );
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(saved != null ? 'Cropped image saved' : 'Save failed')));
   }
 
   @override
@@ -232,15 +221,14 @@ class _HomePreviewScreenState extends State<HomePreviewScreen> with SingleTicker
     final showBar = _chrome && !_zoomed;
 
     return PopScope(
-      // restore status bar as soon as the screen starts closing (back button, swipe-down, arrow)
       onPopInvokedWithResult: (didPop, _) { if (didPop) _showSystemUi(); },
       child: Scaffold(
-        backgroundColor: Colors.transparent,
+        backgroundColor: dp.bg, // 👈 మార్పు: థీమ్ బ్యాక్గ్రౌండ్ వాడాం 
         body: Stack(fit: StackFit.expand, children: [
           Opacity(
             opacity: fade,
             child: Stack(fit: StackFit.expand, children: [
-              const ColoredBox(color: Colors.black),
+              ColoredBox(color: dp.bg), 
               RepaintBoundary(
                 child: AnimatedSwitcher(
                   duration: const Duration(milliseconds: 350),
@@ -253,7 +241,7 @@ class _HomePreviewScreenState extends State<HomePreviewScreen> with SingleTicker
                   ),
                 ),
               ),
-              ColoredBox(color: Colors.black.withValues(alpha: 0.5)),
+              ColoredBox(color: dp.bg.withValues(alpha: 0.7)),
             ]),
           ),
           GestureDetector(
@@ -300,28 +288,18 @@ class _HomePreviewScreenState extends State<HomePreviewScreen> with SingleTicker
                     child: SizedBox(
                       height: 56,
                       child: Row(children: [
-                        IconButton(icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white, size: 20), onPressed: () => Navigator.of(context).pop()),
+                        IconButton(icon: Icon(Icons.arrow_back_ios_new_rounded, color: dp.text, size: 20), onPressed: () => Navigator.of(context).pop()),
                         Expanded(
                           child: Column(
                             mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text(DateFormat('d MMM yyyy').format(cur.createDateTime), style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700)),
-                              Text('${_cur + 1} / $n', style: const TextStyle(color: Colors.white60, fontSize: 12)),
+                              Text(DateFormat('d MMM yyyy').format(cur.createDateTime), style: TextStyle(color: dp.text, fontSize: 16, fontWeight: FontWeight.w700)),
+                              Text('${_cur + 1} / $n', style: TextStyle(color: dp.sub, fontSize: 12)),
                             ],
                           ),
                         ),
-                        // ─── CROP ICON ───
-                        IconButton(
-                          tooltip: 'Crop',
-                          icon: const Icon(Icons.crop_rounded, color: Colors.white),
-                          onPressed: _crop,
-                        ),
-                        // ─── INFO ICON FOR METADATA ───
-                        IconButton(
-                          tooltip: 'Details',
-                          icon: const Icon(Icons.info_outline_rounded, color: Colors.white),
-                          onPressed: () => _showMeta(context, dp, cur),
-                        ),
+                        IconButton(tooltip: 'Crop', icon: Icon(Icons.crop_rounded, color: dp.text), onPressed: _crop),
+                        IconButton(tooltip: 'Details', icon: Icon(Icons.info_outline_rounded, color: dp.text), onPressed: () => _showMeta(context, dp, cur)),
                         const SizedBox(width: 4),
                       ]),
                     ),
@@ -385,15 +363,15 @@ class _ZoomPageState extends State<_ZoomPage> with SingleTickerProviderStateMixi
     _anim..reset()..forward();
   }
 
+  // 👈 మార్పు: Fade image కి BoxFit.contain వాడాం 
   Widget _fade(ImageProvider p) => Image(
-        image: p, fit: BoxFit.cover, gaplessPlayback: true,
+        image: p, fit: BoxFit.contain, gaplessPlayback: true,
         frameBuilder: (c, child, frame, sync) => AnimatedOpacity(opacity: frame == null ? 0 : 1, duration: const Duration(milliseconds: 220), child: child),
       );
 
   @override
   Widget build(BuildContext context) {
     final a = widget.asset;
-    final ar = (a.orientatedWidth > 0 && a.orientatedHeight > 0) ? a.orientatedWidth / a.orientatedHeight : 1.0;
     final thumb = AssetEntityImageProvider(a, isOriginal: false, thumbnailSize: ThumbnailSize.square(widget.thumbPx));
     final big = AssetEntityImageProvider(a, isOriginal: false, thumbnailSize: const ThumbnailSize(1440, 1440));
 
@@ -402,23 +380,17 @@ class _ZoomPageState extends State<_ZoomPage> with SingleTickerProviderStateMixi
       child: InteractiveViewer(
         transformationController: _tc, minScale: 1, maxScale: 6,
         onInteractionUpdate: (_) => _report(), onInteractionEnd: (_) => _report(),
-        child: LayoutBuilder(builder: (ctx, c) {
-          double w = c.maxWidth, h = w / ar;
-          if (h > c.maxHeight) { h = c.maxHeight; w = h * ar; }
-          return Center(
-            child: SizedBox(
-              width: w, height: h,
-              child: Hero(
-                tag: 'photo_${a.id}', flightShuttleBuilder: _shuttle(thumb),
-                child: Stack(fit: StackFit.expand, children: [
-                  Image(image: thumb, fit: BoxFit.cover, gaplessPlayback: true),
-                  _fade(big),
-                  if (_orig) _fade(AssetEntityImageProvider(a, isOriginal: true)),
-                ]),
-              ),
-            ),
-          );
-        }),
+        // 👈 మార్పు: LayoutBuilder తీసేసి డైరెక్ట్ గా సెంటర్ లో ఇమేజ్ ని పెట్టేశాం
+        child: Center(
+          child: Hero(
+            tag: 'photo_${a.id}', flightShuttleBuilder: _shuttle(thumb),
+            child: Stack(fit: StackFit.expand, children: [
+              Image(image: thumb, fit: BoxFit.contain, gaplessPlayback: true),
+              _fade(big),
+              if (_orig) _fade(AssetEntityImageProvider(a, isOriginal: true)),
+            ]),
+          ),
+        ),
       ),
     );
   }

@@ -3,11 +3,9 @@ import 'dart:io';
 import 'package:archive/archive_io.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:permission_handler/permission_handler.dart';
 import '../db/database_helper.dart';
-import '../db/vault_queries.dart';
 
-
-/// Paths manifest lo relative ga untayi, so restore e phone lo aina pani chestundi.
 class BackupService {
   Future<Directory> _vaultSub(String sub) async {
     final base = await getApplicationSupportDirectory();
@@ -16,11 +14,9 @@ class BackupService {
     return d;
   }
 
+  // ─── 1. CREATE ZIP BACKUP (Temporarily in Cache) ───
   Future<File> createBackup({String? albumName, void Function(int done, int total)? onProgress}) async {
-    // 1. Data motham fetch chestunnam
     final allItems = await DatabaseHelper.instance.fetchAll();
-    
-    // 2. Okavela albumName isthe, aa album photos matrame filter chestunnam
     final items = albumName != null 
         ? allItems.where((i) => i.albumName == albumName).toList()
         : allItems;
@@ -36,9 +32,9 @@ class BackupService {
 
     for (final i in items) {
       final media = File(i.encryptedPath);
-      if (!await media.exists()) continue; // missing file skip
+      if (!await media.exists()) continue; // ఫైల్ లేకపోతే స్కిప్
 
-      // level 0 = store only. Photos already compressed, so this is much faster.
+      // కుదించిన ఫైల్స్ కాబట్టి level 0 (ఫాస్ట్) వాడుతున్నాం
       await enc.addFile(media, 'media/${p.basename(media.path)}', 0);
 
       String? thumbName;
@@ -67,10 +63,41 @@ class BackupService {
     await enc.addFile(mf, 'manifest.json');
     enc.close();
     await mf.delete();
+    
     return zip;
   }
 
-  /// Returns number of restored items. Already-existing files are skipped (no duplicates).
+  // ─── 2. EXPORT TO DOWNLOADS (Public Folder) ───
+  Future<String?> exportToDownloads(File backupZip) async {
+    try {
+      // ఆండ్రాయిడ్ స్టోరేజ్ పర్మిషన్స్ చెక్ చేస్తున్నాం
+      if (Platform.isAndroid) {
+        final status = await Permission.storage.request();
+        if (!status.isGranted && !await Permission.manageExternalStorage.isGranted) {
+          return null; 
+        }
+      }
+
+      // ఆండ్రాయిడ్ అఫీషియల్ డౌన్‌లోడ్స్ ఫోల్డర్ పాత్
+      final downloadDir = Directory('/storage/emulated/0/Download');
+      if (!await downloadDir.exists()) await downloadDir.create(recursive: true);
+
+      final stamp = DateTime.now().toIso8601String().split('.').first.replaceAll(':', '-');
+      final fileName = 'Vault_Backup_$stamp.zip';
+      final destPath = p.join(downloadDir.path, fileName);
+
+      // ఫైల్ ని పబ్లిక్ ఫోల్డర్ కి కాపీ చేసి, ప్రైవేట్ ఫైల్ ని డిలీట్ చేస్తున్నాం (స్టోరేజ్ సేవ్ అవ్వడానికి)
+      await backupZip.copy(destPath);
+      if (await backupZip.exists()) await backupZip.delete();
+
+      return destPath;
+    } catch (e) {
+      print('Export Error: $e');
+      return null;
+    }
+  }
+
+  // ─── 3. RESTORE FROM ZIP ───
   Future<int> restore(File zip) async {
     final tmp = await getTemporaryDirectory();
     final work = Directory(p.join(tmp.path, 'restore_tmp'));
@@ -80,7 +107,7 @@ class BackupService {
     try {
       await extractFileToDisk(zip.path, work.path);
       final mf = File(p.join(work.path, 'manifest.json'));
-      if (!await mf.exists()) throw Exception('Idi valid vault backup kaadu');
+      if (!await mf.exists()) throw Exception('ఇది కరెక్ట్ బ్యాకప్ ఫైల్ కాదు!');
 
       final data = jsonDecode(await mf.readAsString()) as Map<String, dynamic>;
       final mediaDir = await _vaultSub('media');
@@ -88,13 +115,12 @@ class BackupService {
       var restored = 0;
 
       for (final r in (data['items'] as List).cast<Map<String, dynamic>>()) {
-        // basename = path traversal nunchi protect
         final mediaName = p.basename(r['media'] as String);
         final src = File(p.join(work.path, 'media', mediaName));
         if (!await src.exists()) continue;
 
         final destPath = p.join(mediaDir.path, mediaName);
-        if (await File(destPath).exists()) continue; // already in vault
+        if (await File(destPath).exists()) continue; // ఆల్రెడీ ఉంటే స్కిప్
 
         await _move(src, destPath);
 
@@ -121,6 +147,7 @@ class BackupService {
       }
       return restored;
     } finally {
+      // పని అయిపోయాక టెంపరరీ ఫైల్స్ క్లీన్ చేస్తున్నాం
       if (await work.exists()) await work.delete(recursive: true);
     }
   }
@@ -129,7 +156,7 @@ class BackupService {
     try {
       await src.rename(dest);
     } catch (_) {
-      await src.copy(dest); // different filesystem fallback
+      await src.copy(dest);
       await src.delete();
     }
   }

@@ -151,41 +151,195 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
     }
   }
 
-  // ─── BACKUP (All or Selected Album) ───
+  // ─── BACKUP (Center Dialog with Progress) ───
   Future<void> _backup({String? albumName}) async {
-    showDialog(context: context, barrierDismissible: false, builder: (_) => const Center(child: CircularProgressIndicator()));
+    final p = context.read<ThemeProvider>().p;
+    
+    // ప్రోగ్రెస్ ని రియల్ టైమ్ లో అప్‌డేట్ చేయడానికి Notifiers వాడుతున్నాం
+    final progressVal = ValueNotifier<double>(0.0);
+    final statusText = ValueNotifier<String>('ప్రిపేర్ అవుతోంది...');
+    final dialogState = ValueNotifier<int>(0); // 0: Loading, 1: Success, 2: Error
+
+    // 1. సెంటర్ లో డైలాగ్ ఓపెన్ చేస్తున్నాం
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: p.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+        content: ValueListenableBuilder<int>(
+          valueListenable: dialogState,
+          builder: (ctx, state, _) {
+            // ── SUCCESS UI ──
+            if (state == 1) {
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.check_circle_rounded, color: Colors.green, size: 64),
+                  const SizedBox(height: 16),
+                  Text('Backup Finished! 🎉', style: TextStyle(color: p.text, fontSize: 20, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 8),
+                  Text(albumName != null ? '$albumName ఆల్బమ్ Downloads ఫోల్డర్ లో సేవ్ అయింది.' : 'మొత్తం బ్యాకప్ Downloads ఫోల్డర్ లో సేవ్ అయింది.', style: TextStyle(color: p.sub, fontSize: 14), textAlign: TextAlign.center),
+                  const SizedBox(height: 24),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(backgroundColor: p.accent, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)), padding: const EdgeInsets.symmetric(vertical: 12)),
+                      onPressed: () => Navigator.pop(ctx),
+                      child: const Text('OK', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+                    ),
+                  )
+                ],
+              );
+            } 
+            // ── ERROR UI ──
+            else if (state == 2) {
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.error_outline_rounded, color: Colors.redAccent, size: 64),
+                  const SizedBox(height: 16),
+                  Text('Backup Failed ❌', style: TextStyle(color: p.text, fontSize: 20, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 8),
+                  ValueListenableBuilder<String>(
+                    valueListenable: statusText,
+                    builder: (ctx, txt, _) => Text(txt, style: TextStyle(color: p.sub, fontSize: 14), textAlign: TextAlign.center),
+                  ),
+                  const SizedBox(height: 24),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)), padding: const EdgeInsets.symmetric(vertical: 12)),
+                      onPressed: () => Navigator.pop(ctx),
+                      child: const Text('Close', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+                    ),
+                  )
+                ],
+              );
+            }
+
+            // ── LOADING UI (Progress Bar) ──
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const SizedBox(height: 10),
+                ValueListenableBuilder<double>(
+                  valueListenable: progressVal,
+                  builder: (ctx, prog, _) => CircularProgressIndicator(
+                    value: prog > 0 ? prog : null, 
+                    color: p.accent, backgroundColor: p.border, strokeWidth: 5,
+                  ),
+                ),
+                const SizedBox(height: 20),
+                Text('బ్యాకప్ అవుతోంది...', style: TextStyle(color: p.text, fontSize: 18, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 8),
+                ValueListenableBuilder<String>(
+                  valueListenable: statusText,
+                  builder: (ctx, txt, _) => Text(txt, style: TextStyle(color: p.sub, fontSize: 14, fontWeight: FontWeight.w500), textAlign: TextAlign.center),
+                ),
+                const SizedBox(height: 10),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+
+    // 2. బ్యాక్‌గ్రౌండ్ లో బ్యాకప్ ప్రాసెస్ స్టార్ట్ చేస్తున్నాం
     try {
-      await BackupService().createBackup(albumName: albumName);
-      if (!mounted) return;
-      Navigator.pop(context);
-      setState(() => _selectedAlbum = null);
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(albumName != null ? '$albumName Backup Saved ✅' : 'Full Backup Saved ✅')));
+      final tempZip = await BackupService().createBackup(
+        albumName: albumName,
+        onProgress: (done, total) {
+          // ఇక్కడి నుంచే ప్రోగ్రెస్ బార్ కి డేటా వెళ్తుంది
+          progressVal.value = done / total;
+          statusText.value = '$done / $total ఫైల్స్ సేవ్ అయ్యాయి';
+        },
+      );
+      
+      statusText.value = 'Downloads లోకి పంపుతోంది...';
+      progressVal.value = 0.0; // ఫైల్ కాపీ అయ్యేటప్పుడు లోడింగ్ తిరుగుతుంది
+      
+      final savedPath = await BackupService().exportToDownloads(tempZip);
+      
+      if (savedPath != null) {
+        dialogState.value = 1; // Success స్టేట్ కి మారుస్తున్నాం
+        if (mounted) setState(() => _selectedAlbum = null);
+      } else {
+        statusText.value = 'Storage Permission లేదు. యాప్ సెట్టింగ్స్ లో పర్మిషన్ ఇవ్వండి.';
+        dialogState.value = 2; // Error స్టేట్
+      }
     } catch (e) {
-      if (!mounted) return;
-      Navigator.pop(context);
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Backup Failed: $e ❌')));
+      statusText.value = e.toString();
+      dialogState.value = 2; // Error స్టేట్
     }
   }
 
-  // ─── RESTORE ───
+  // ─── RESTORE (Center Dialog) ───
   Future<void> _restore() async {
     const XTypeGroup zipTypeGroup = XTypeGroup(label: 'Zip Files', extensions: ['zip']);
     final XFile? file = await openFile(acceptedTypeGroups: [zipTypeGroup]);
 
     if (file == null || !mounted) return;
     final path = file.path;
+    final p = context.read<ThemeProvider>().p;
 
-    showDialog(context: context, barrierDismissible: false, builder: (_) => const Center(child: CircularProgressIndicator()));
+    final dialogState = ValueNotifier<int>(0); 
+    final restoredCount = ValueNotifier<int>(0);
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: p.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+        content: ValueListenableBuilder<int>(
+          valueListenable: dialogState,
+          builder: (ctx, state, _) {
+            if (state == 1) {
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.settings_backup_restore_rounded, color: Colors.green, size: 64),
+                  const SizedBox(height: 16),
+                  Text('Restore Finished!', style: TextStyle(color: p.text, fontSize: 20, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 8),
+                  Text('${restoredCount.value} ఫోటోలు / వీడియోలు రిస్టోర్ అయ్యాయి 🔄', style: TextStyle(color: p.sub, fontSize: 14), textAlign: TextAlign.center),
+                  const SizedBox(height: 24),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(backgroundColor: p.accent, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)), padding: const EdgeInsets.symmetric(vertical: 12)),
+                      onPressed: () => Navigator.pop(ctx),
+                      child: const Text('OK', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+                    ),
+                  )
+                ],
+              );
+            }
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const SizedBox(height: 10),
+                CircularProgressIndicator(color: p.accent, strokeWidth: 5),
+                const SizedBox(height: 20),
+                Text('డేటా రిస్టోర్ అవుతోంది...', style: TextStyle(color: p.text, fontSize: 18, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 8),
+                Text('దయచేసి వేచి ఉండండి', style: TextStyle(color: p.sub, fontSize: 14)),
+                const SizedBox(height: 10),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+
     try {
       final n = await BackupService().restore(File(path));
-      await File(path).delete().catchError((_) => File(path));
-      if (!mounted) return;
-      Navigator.pop(context);
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$n photos restored! 🔄')));
-      _loadAlbums();
+      restoredCount.value = n;
+      dialogState.value = 1; // Success
+      if (mounted) _loadAlbums();
     } catch (e) {
-      if (!mounted) return;
-      Navigator.pop(context);
+      if (mounted) Navigator.pop(context);
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Restore failed: $e ❌')));
     }
   }

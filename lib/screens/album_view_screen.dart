@@ -657,7 +657,7 @@ class _PhotoPreviewScreenState extends State<PhotoPreviewScreen> {
     final p = context.watch<ThemeProvider>().p;
 
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: p.bg, // 👈 1. ఇక్కడ Colors.black తీసేసి p.bg పెట్టు
       extendBodyBehindAppBar: true,
       body: Stack(
         fit: StackFit.expand,
@@ -668,7 +668,10 @@ class _PhotoPreviewScreenState extends State<PhotoPreviewScreen> {
               pageController: _pc,
               itemCount: widget.items.length,
               onPageChanged: (i) => setState(() => _index = i),
-              backgroundDecoration: const BoxDecoration(color: Colors.black),
+              
+              // 👈 2. ఇక్కడ కూడా const BoxDecoration(color: Colors.black) తీసేసి ఇలా పెట్టు
+              backgroundDecoration: BoxDecoration(color: p.bg), 
+              
               builder: (_, i) {
                 final item = widget.items[i];
                 return PhotoViewGalleryPageOptions(
