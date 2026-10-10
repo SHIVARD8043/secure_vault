@@ -29,11 +29,20 @@ android {
         versionName = flutter.versionName
     }
 
+    // 👈 1. ఇక్కడ కొత్తగా మన రియల్ సిగ్నేచర్ (Release Keystore) సెట్టింగ్స్ యాడ్ చేశాం
+    signingConfigs {
+        create("release") {
+            storeFile = file(System.getenv("KEYSTORE_PATH") ?: "upload-keystore.jks")
+            storePassword = System.getenv("STORE_PASSWORD")
+            keyAlias = System.getenv("KEY_ALIAS")
+            keyPassword = System.getenv("KEY_PASSWORD")
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            // 👈 2. పాత 'debug' తీసేసి, పైన మనం క్రియేట్ చేసిన 'release' ని లింక్ చేశాం
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 }

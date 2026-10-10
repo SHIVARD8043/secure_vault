@@ -24,16 +24,26 @@ class VaultService {
       final src = await asset.originFile;
       if (src == null) return false;
 
+      // 1. కాపీ చేయడానికి ముందే పాత ఫైల్ ఒరిజినల్ టైమ్స్ సేవ్ చేసుకుంటున్నాం
+      final stat = await src.stat();
+      final originalModified = stat.modified;
+      final originalAccessed = stat.accessed;
+
       final media = await _dir('media');
       final thumbs = await _dir('thumbs');
       final id = '${DateTime.now().microsecondsSinceEpoch}_${_rand.nextInt(9999)}';
       final dest = p.join(media.path, '$id${p.extension(src.path)}');
+      final destFile = File(dest);
 
       await src.copy(dest); 
-      if (await File(dest).length() != await src.length()) {
-        await File(dest).delete();
+      if (await destFile.length() != await src.length()) {
+        await destFile.delete();
         return false;
       }
+
+      // 2. 👈 అసలైన మ్యాజిక్: వాల్ట్ లోకి వచ్చిన కొత్త ఫైల్ కి పాత డేట్ ని సెట్ చేస్తున్నాం!
+      await destFile.setLastModified(originalModified);
+      await destFile.setLastAccessed(originalAccessed);
 
       String? thumbPath;
       final bytes = await asset.thumbnailDataWithSize(const ThumbnailSize(400, 400), quality: 80);

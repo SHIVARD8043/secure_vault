@@ -12,14 +12,12 @@ import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../core/vault_service.dart';
 import '../db/database_helper.dart';
-import '../db/vault_queries.dart';
 import 'albums_screen.dart';
 import 'home_preview_screen.dart';
-import 'video_loop_preview.dart';
 import 'video_player_screen.dart';
 import 'package:provider/provider.dart';
 import '../core/theme_provider.dart';
-import 'device_album_screen.dart'; // 👈 కొత్తగా క్రియేట్ చేసిన ఫైల్
+import 'device_album_screen.dart';
 
 // ════════════════════════════════════════════════════════════════════
 //  PALETTE, GLASS WIDGET & SHARED BUTTONS
@@ -75,7 +73,6 @@ class _Glass extends StatelessWidget {
   }
 }
 
-/// Press-scale wrapper with haptic feedback.
 class _Press extends StatefulWidget {
   const _Press({required this.onTap, required this.child});
   final VoidCallback onTap;
@@ -140,7 +137,6 @@ class _DockBtn extends StatelessWidget {
   }
 }
 
-/// Floating horizontal glass dock at the bottom (shown while selecting).
 class _Dock extends StatelessWidget {
   const _Dock({super.key, required this.p, required this.count, required this.onShare, required this.onCopy, required this.onMove, required this.onDelete});
   final _P p;
@@ -251,24 +247,23 @@ HeroFlightShuttleBuilder _shuttle(ImageProvider img) {
       );
 }
 
-String _fmtDur(Duration d) {
-  final h = d.inHours, m = d.inMinutes.remainder(60), sec = d.inSeconds.remainder(60);
-  final ss = sec.toString().padLeft(2, '0');
-  return h > 0 ? '$h:${m.toString().padLeft(2, '0')}:$ss' : '$m:$ss';
-}
-
 class _Tile extends StatelessWidget {
-  const _Tile({super.key, required this.asset, required this.px, required this.selected, required this.selecting, required this.p, required this.live});
+  const _Tile({super.key, required this.asset, required this.px, required this.selected, required this.selecting, required this.p});
   final AssetEntity asset;
   final int px;
   final bool selected, selecting;
   final _P p;
-  /// ids of video tiles that are allowed to run the 5s loop preview right now.
-  final ValueListenable<Set<String>> live;
 
   @override
   Widget build(BuildContext context) {
-    final provider = AssetEntityImageProvider(asset, isOriginal: false, thumbnailSize: ThumbnailSize.square(px));
+    // 👈 1. థంబ్‌నెయిల్ డీకోడర్ ఫెయిల్ అయినా యాప్ క్రాష్ అవ్వకుండా 'format' సెట్ చేశాం
+    final provider = AssetEntityImageProvider(
+      asset, 
+      isOriginal: false, 
+      thumbnailSize: ThumbnailSize.square(px),
+      thumbnailFormat: ThumbnailFormat.jpeg, // Glide క్రాష్ అవ్వకుండా Force JPEG
+    );
+    
     final isVideo = asset.type == AssetType.video;
 
     final framed = DecoratedBox(
@@ -281,32 +276,36 @@ class _Tile extends StatelessWidget {
             Image(
               image: provider, fit: BoxFit.cover, gaplessPlayback: true,
               frameBuilder: (c, child, frame, sync) => sync ? child : AnimatedOpacity(
-                      opacity: frame == null ? 0 : 1, duration: const Duration(milliseconds: 220), child: child),
+                  opacity: frame == null ? 0 : 1, duration: const Duration(milliseconds: 220), child: child),
+              // 👈 2. గ్లైడ్ (Glide) ఎర్రర్ త్రో చేసినా క్రాష్ అవ్వకుండా సేఫ్ గా డీఫాల్ట్ ఐకాన్ చూపిస్తుంది 
+              errorBuilder: (context, error, stackTrace) {
+                return ColoredBox(
+                  color: p.surface,
+                  child: Center(
+                    child: Icon(
+                      isVideo ? Icons.videocam_off_rounded : Icons.broken_image_rounded, 
+                      color: p.sub, 
+                      size: 28
+                    ),
+                  ),
+                );
+              },
             ),
-            // 5s muted loop - mounted only for the few tiles chosen by the screen (see _updateLive)
-            if (isVideo)
-              ValueListenableBuilder<Set<String>>(
-                valueListenable: live,
-                builder: (_, ids, __) => ids.contains(asset.id)
-                    ? VideoLoopPreview(key: ValueKey('loop_${asset.id}'), loadFile: () => asset.originFile)
-                    : const SizedBox.shrink(),
-              ),
-            const IgnorePointer(child: DecoratedBox(decoration: BoxDecoration(gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.center, colors: [Color(0x26FFFFFF), Color(0x00FFFFFF)])))),
+            
             if (isVideo)
               Positioned(
-                right: 5, bottom: 5,
-                child: DecoratedBox(
-                  decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.55), borderRadius: BorderRadius.circular(8)),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-                    child: Row(mainAxisSize: MainAxisSize.min, children: [
-                      const Icon(Icons.play_arrow_rounded, color: Colors.white, size: 13),
-                      const SizedBox(width: 2),
-                      Text(_fmtDur(asset.videoDuration), style: const TextStyle(color: Colors.white, fontSize: 10.5, fontWeight: FontWeight.w600)),
-                    ]),
-                  ),
+                right: 6, bottom: 6,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                  decoration: BoxDecoration(color: Colors.black.withOpacity(0.75), borderRadius: BorderRadius.circular(6)),
+                  child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(Icons.play_arrow_rounded, color: Colors.white, size: 14),
+                    SizedBox(width: 4),
+                    Text('VIDEO', style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold, letterSpacing: 0.5)),
+                  ]),
                 ),
               ),
+
             AnimatedContainer(duration: const Duration(milliseconds: 180), color: selected ? p.accent.withValues(alpha: 0.22) : Colors.transparent),
           ]),
         ),
@@ -317,7 +316,6 @@ class _Tile extends StatelessWidget {
       child: Stack(fit: StackFit.expand, children: [
         AnimatedScale(
           scale: selected ? 0.86 : 1, duration: const Duration(milliseconds: 200), curve: Curves.easeOutCubic,
-          // videos open in VideoPlayerScreen (no Hero target), so Hero only for images
           child: isVideo ? framed : Hero(tag: 'photo_${asset.id}', flightShuttleBuilder: _shuttle(provider), child: framed),
         ),
         if (selecting) Positioned(top: 7, left: 7, child: _Check(on: selected, p: p)),
@@ -330,7 +328,6 @@ class _Tile extends StatelessWidget {
 //  TABS: KEEP-ALIVE PAGE, GLASS PILL TABS, ALBUM CARD
 // ════════════════════════════════════════════════════════════════════
 
-/// Keeps a tab page alive so the grid keeps its scroll position.
 class _Keep extends StatefulWidget {
   const _Keep({required this.child});
   final Widget child;
@@ -348,7 +345,6 @@ class _KeepState extends State<_Keep> with AutomaticKeepAliveClientMixin {
   }
 }
 
-/// Glass pill tabs whose indicator follows the swipe.
 class _TabPill extends StatelessWidget {
   const _TabPill({required this.p, required this.ctrl, required this.labels});
   final _P p;
@@ -473,7 +469,7 @@ class HomeGalleryScreen extends StatefulWidget {
   State<HomeGalleryScreen> createState() => _HomeGalleryScreenState();
 }
 
-class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProviderStateMixin, WidgetsBindingObserver {
+class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProviderStateMixin {
   static const _pageSize = 120;
   static const _hPad = 4.0, _gap = 3.0, _headerH = 58.0;
   static const _kGridKey = 'home_grid_cols';
@@ -484,8 +480,8 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
   final Set<String> _selected = {};
 
   AssetPathEntity? _album;
-  String? _albumId; // currently selected device album id (session only)
-  List<AssetPathEntity> _albums = []; // non-empty device albums
+  String? _albumId; 
+  List<AssetPathEntity> _albums = [];
   final Map<String, int> _albumCounts = {};
   bool _hasMore = true, _loading = false, _ready = false;
   int _gen = 0;
@@ -498,7 +494,6 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
   bool _light = false;
   _P get _pal => _P.mix(Curves.easeInOut.transform(_themeCtrl.value));
 
-  // true when the photos tab was opened by tapping an album card (so Back returns to Albums tab)
   bool _fromAlbums = false;
 
   bool _dragActive = false, _dragSelect = true;
@@ -508,25 +503,17 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
   Timer? _autoTimer;
   double _topPad = 0, _viewH = 0, _gw = 0;
 
-  // ── video loop previews: only a few tiles play, and only when scrolling has settled ──
-  static const _maxLive = 4;
-  final ValueNotifier<Set<String>> _live = ValueNotifier(const <String>{});
-  Timer? _idleTimer;
-
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
     _tabs.addListener(() {
-      if (_tabs.index == 1) _fromAlbums = false; // user manually went to Albums tab -> reset
-      _tabs.index == 0 ? _scheduleLive() : _stopLive();
+      if (_tabs.index == 1) _fromAlbums = false;
     });
     _scroll.addListener(() {
       if (_scroll.hasClients && _scroll.position.pixels > _scroll.position.maxScrollExtent - 1200) _loadMore();
     });
     _loadPrefs().then((_) => _reload());
 
-    // Sync the saved theme as soon as the screen opens
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final isDark = context.read<ThemeProvider>().isDark;
       setState(() {
@@ -548,9 +535,6 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
 
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    _idleTimer?.cancel();
-    _live.dispose();
     _autoTimer?.cancel();
     _tabs.dispose();
     _themeCtrl.dispose();
@@ -558,53 +542,8 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     super.dispose();
   }
 
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) { _scheduleLive(); } else { _stopLive(); }
-  }
-
-  void _stopLive() {
-    _idleTimer?.cancel();
-    if (_live.value.isNotEmpty) _live.value = const <String>{};
-  }
-
-  void _scheduleLive([int ms = 400]) {
-    _idleTimer?.cancel();
-    _idleTimer = Timer(Duration(milliseconds: ms), _updateLive);
-  }
-
   bool _onScrollNote(ScrollNotification n) {
-    if (n.depth != 0) return false;
-    if (n is ScrollStartNotification || n is ScrollUpdateNotification) {
-      if (_live.value.isNotEmpty) _live.value = const <String>{}; // free decoders while moving
-      _scheduleLive(350); // debounce: fires ~350ms after the last scroll movement
-    }
     return false;
-  }
-
-  /// Picks up to _maxLive visible videos (closest to viewport centre) for loop preview.
-  void _updateLive() {
-    final L = _layout;
-    if (!mounted || _tabs.index != 0 || L == null || L.rows.isEmpty || !_scroll.hasClients || _viewH == 0) return;
-    final y0 = _scroll.offset, y1 = y0 + _viewH - _topPad, mid = (y0 + y1) / 2;
-    var lo = 0, hi = L.rows.length - 1;
-    while (lo < hi) {
-      final m = (lo + hi) >> 1;
-      if (L.rows[m].top + L.rows[m].height <= y0) lo = m + 1; else hi = m;
-    }
-    final cand = <(double, String)>[];
-    for (var i = lo; i < L.rows.length && L.rows[i].top < y1; i++) {
-      final r = L.rows[i];
-      if (r.header) continue;
-      final dist = ((r.top + r.height / 2) - mid).abs();
-      for (var c = 0; c < r.count; c++) {
-        final a = _items[r.start + c];
-        if (a.type == AssetType.video) cand.add((dist, a.id));
-      }
-    }
-    cand.sort((a, b) => a.$1.compareTo(b.$1));
-    final next = cand.take(_maxLive).map((e) => e.$2).toSet();
-    if (!setEquals(next, _live.value)) _live.value = next;
   }
 
   Future<void> _reload() async {
@@ -617,7 +556,6 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     );
     if (!mounted || gen != _gen) return;
 
-    // drop empty albums, remember counts for the picker
     final counts = await Future.wait(albums.map((a) => a.assetCountAsync));
     if (!mounted || gen != _gen) return;
     final list = <AssetPathEntity>[];
@@ -646,13 +584,14 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     if (!mounted || gen != _gen) return;
     setState(() {
       _items..clear()..addAll(first);
+      // 👈 2. పక్కా సార్టింగ్ లాజిక్ ఇక్కడే ఉంది 
+      _items.sort((a, b) => b.createDateTime.compareTo(a.createDateTime));
       _hasMore = first.length == want;
       _loadAllFuture = null;
       _loading = false;
       _regroup();
       _ready = true;
     });
-    _scheduleLive(600);
   }
 
   Future<void> _loadMore({int size = _pageSize}) async {
@@ -664,6 +603,7 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
       if (!mounted || gen != _gen) return;
       setState(() {
         _items.addAll(batch);
+        _items.sort((a, b) => b.createDateTime.compareTo(a.createDateTime)); // 👈 సార్టింగ్ అప్డేట్
         if (batch.length < size) _hasMore = false;
         _regroup();
       });
@@ -686,7 +626,8 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
       final a = _items[i], d = a.createDateTime, day = DateTime(d.year, d.month, d.day);
       final String key = day == today ? 'T' : day == yesterday ? 'Y' : d.year == now.year ? 'd${day.millisecondsSinceEpoch}' : 'm${d.year}-${d.month}';
       if (key != lastKey) {
-        final label = key == 'T' ? "ఈరోజు (Today)" : key == 'Y' ? "నిన్న (Yesterday)" : d.year == now.year ? DateFormat('EEE, MMM d').format(d) : DateFormat('MMMM yyyy').format(d);
+        // 👈 5. ప్యూర్ ఇంగ్లీష్ టెక్స్ట్
+        final label = key == 'T' ? "Today" : key == 'Y' ? "Yesterday" : d.year == now.year ? DateFormat('EEE, MMM d').format(d) : DateFormat('MMMM yyyy').format(d);
         _groups.add(_Group(label, i, d.year));
         lastKey = key;
       } else { _groups.last.count++; }
@@ -722,6 +663,7 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     _sel(() => all ? _selected.removeAll(ids) : _selected.addAll(ids));
   }
 
+  // 👈 3. పక్కా ట్యాప్ టార్గెట్ ఫిక్స్ (గ్యాప్ లో నొక్కితే ఇగ్నోర్ చేస్తుంది)
   (_Row, int)? _hit(Offset local) {
     final L = _layout;
     if (L == null || !_scroll.hasClients || L.rows.isEmpty) return null;
@@ -734,7 +676,16 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     }
     final r = L.rows[lo];
     if (r.header) return (r, r.start);
-    final col = ((local.dx - _hPad) / (L.cell + _gap)).floor().clamp(0, r.count - 1);
+    
+    final colX = local.dx - _hPad;
+    if (colX < 0) return null;
+    
+    final col = (colX / (L.cell + _gap)).floor();
+    final rem = colX % (L.cell + _gap);
+    
+    // ఫోటో కరెక్ట్ గా ఉన్న స్పేస్ లో నొక్కితేనే తీసుకుంటుంది, ఖాళీ ప్లేస్ లో నొక్కితే ఇగ్నోర్
+    if (col < 0 || col >= L.cols || col >= r.count || rem > L.cell) return null;
+    
     return (r, r.start + col);
   }
 
@@ -787,13 +738,11 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
 
   Future<void> _openPreview(int idx) async {
     final asset = _items[idx];
-    _stopLive(); // release decoders before another screen takes over
     if (asset.type == AssetType.video) {
       final f = await asset.originFile;
-      if (f == null || !mounted) { _scheduleLive(); return; }
+      if (f == null || !mounted) return;
       await Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => VideoPlayerScreen(file: f, title: asset.title)));
     } else {
-      // HomePreviewScreen is image-only, so swipe through images only
       final imgs = _items.where((e) => e.type != AssetType.video).toList();
       final start = imgs.indexWhere((e) => e.id == asset.id);
       final px = _layout?.thumbPx ?? 250;
@@ -802,19 +751,13 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
         transitionDuration: const Duration(milliseconds: 420),
         reverseTransitionDuration: const Duration(milliseconds: 320),
         pageBuilder: (_, __, ___) => HomePreviewScreen(items: imgs, initial: start < 0 ? 0 : start, thumbPx: px),
-        transitionsBuilder: (_, a, __, child) => FadeTransition(
-          opacity: CurvedAnimation(parent: a, curve: Curves.easeOutCubic),
-          child: child,
-        ),
+        transitionsBuilder: (_, a, __, child) => FadeTransition(opacity: CurvedAnimation(parent: a, curve: Curves.easeOutCubic), child: child),
       ));
     }
-    if (mounted) _scheduleLive();
   }
 
-  // ─────────────────────────── ALBUM SWITCHING ───────────────────────────
   void _switchAlbum(String id) {
     if (id == _albumId) return;
-    _stopLive();
     _dragEnd();
     setState(() {
       _selected.clear();
@@ -829,19 +772,12 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     _reload();
   }
 
-  /// Tap on an album card: opens the new DeviceAlbumScreen without changing tabs
   void _openAlbum(String id) {
     final albumEntity = _albums.firstWhere((a) => a.id == id);
     final albumName = albumEntity.isAll ? 'All photos' : albumEntity.name;
-    
-    // జంప్ అవ్వకుండా డైరెక్ట్ గా సపరేట్ స్క్రీన్ ఓపెన్ చేస్తున్నాం
-    Navigator.push(
-      context, 
-      MaterialPageRoute(builder: (_) => DeviceAlbumScreen(album: albumEntity, albumName: albumName))
-    );
+    Navigator.push(context, MaterialPageRoute(builder: (_) => DeviceAlbumScreen(album: albumEntity, albumName: albumName)));
   }
 
-  // ─────────────────────────── ACTIONS ───────────────────────────
   Future<String?> _showAlbumPicker(String title) async {
     final albums = (await DatabaseHelper.instance.fetchAlbums()).map((e) => e['albumName'] as String).toList();
     final ctrl = TextEditingController();
@@ -853,7 +789,7 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
         backgroundColor: p.surface, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
         title: Text(title, style: TextStyle(color: p.text, fontSize: 18, fontWeight: FontWeight.w700)),
         content: Column(mainAxisSize: MainAxisSize.min, children: [
-          TextField(controller: ctrl, style: TextStyle(color: p.text), decoration: InputDecoration(hintText: 'కొత్త ఆల్బమ్ పేరు', hintStyle: TextStyle(color: p.sub))),
+          TextField(controller: ctrl, style: TextStyle(color: p.text), decoration: InputDecoration(hintText: 'New album name', hintStyle: TextStyle(color: p.sub))),
           const SizedBox(height: 14),
           Wrap(spacing: 8, runSpacing: 6, children: [
             for (final a in albums) ActionChip(backgroundColor: p.bg2, side: BorderSide(color: p.border), label: Text(a, style: TextStyle(color: p.text)), onPressed: () => Navigator.pop(ctx, a)),
@@ -865,28 +801,6 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
         ],
       ),
     );
-  }
-
-  // ─── CONFIRMATION DIALOG HELPER ───
-  Future<bool> _showConfirmDialog(String title, String content, String actionText) async {
-    final p = _pal;
-    final res = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: p.surface,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
-        title: Text(title, style: TextStyle(color: p.text, fontWeight: FontWeight.bold)),
-        content: Text(content, style: TextStyle(color: p.sub, fontSize: 14)),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text('Cancel', style: TextStyle(color: p.text))),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: Text(actionText, style: const TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold)),
-          ),
-        ],
-      ),
-    );
-    return res ?? false;
   }
 
   Future<void> _shareSelected() async {
@@ -908,62 +822,83 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     }
   }
 
+  // 👈 6. స్కిప్ డూప్లికేట్స్ లాజిక్ యాడ్ చేసాం
   Future<void> _copySelectedToVault() async {
     final chosen = _items.where((a) => _selected.contains(a.id)).toList();
     if (chosen.isEmpty) return;
-    final targetAlbum = await _showAlbumPicker('కాపీ టు వాల్ట్ (Copy)');
+    final targetAlbum = await _showAlbumPicker('Copy to Vault');
     if (targetAlbum == null || !mounted) return;
 
     showDialog(context: context, barrierDismissible: false, builder: (_) => const Center(child: CircularProgressIndicator()));
+    
     final vault = VaultService();
+    final existing = await DatabaseHelper.instance.fetchAll();
+    
     int successCount = 0;
+    int skippedCount = 0;
 
     for (final a in chosen) {
+      // చెక్: సేమ్ పేరు, సేమ్ ఆల్బమ్ లో ఆల్రెడీ ఉంటే కాపీ స్కిప్ అవుతుంది 
+      bool isDup = existing.any((e) => e.originalName == a.title && e.albumName == targetAlbum && e.isDeleted == 0);
+      if (isDup) {
+        skippedCount++;
+        continue;
+      }
+      
       if (await vault.hideAsset(a, targetAlbum)) successCount++;
     }
 
     if (!mounted) return;
     Navigator.pop(context);
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$successCount/${chosen.length} ఫోటోలు $targetAlbum లోకి కాపీ అయ్యాయి 📄')));
+    
+    final msg = skippedCount > 0 
+        ? '$successCount copied to $targetAlbum, $skippedCount skipped (duplicate)'
+        : '$successCount items copied to $targetAlbum 📄';
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
     setState(_selected.clear);
   }
 
+  // 👈 4. మూవ్ కి కన్ఫర్మేషన్ తీసేసి డైరెక్ట్ గా డిలీట్ (+ స్కిప్ డూప్లికేట్స్)
   Future<void> _moveSelectedToVault() async {
     final chosen = _items.where((a) => _selected.contains(a.id)).toList();
     if (chosen.isEmpty) return;
 
-    final targetAlbum = await _showAlbumPicker('వాల్ట్ లోకి మార్చు (Move)');
+    final targetAlbum = await _showAlbumPicker('Move to Vault');
     if (targetAlbum == null || !mounted) return;
-
-    final confirm = await _showConfirmDialog(
-      'Move to Vault',
-      'ఈ ${chosen.length} ఫోటోలను వాల్ట్ లోకి మార్చాలా?',
-      'Move',
-    );
-    if (!confirm || !mounted) return;
 
     showDialog(context: context, barrierDismissible: false, builder: (_) => const Center(child: CircularProgressIndicator()));
 
     final vault = VaultService();
+    final existing = await DatabaseHelper.instance.fetchAll();
     final idsToDelete = <String>[];
     int successCount = 0;
+    int skippedCount = 0;
 
     for (final a in chosen) {
+      bool isDup = existing.any((e) => e.originalName == a.title && e.albumName == targetAlbum && e.isDeleted == 0);
+      if (isDup) {
+        skippedCount++;
+        idsToDelete.add(a.id); // వాల్ట్ లో ఆల్రెడీ ఉంటే మూవ్ స్కిప్ చేస్తాం, కానీ ఫోన్ లో నుండి లేపేస్తాం 
+        continue;
+      }
+
       if (await vault.hideAsset(a, targetAlbum)) {
         successCount++;
-        idsToDelete.add(a.id); // వాల్ట్ లోకి సేఫ్ గా వెళ్ళిన వాటి ఐడీలు మాత్రమే నోట్ చేసుకుంటున్నాం
+        idsToDelete.add(a.id);
       }
     }
 
-    // 👈 అసలైన డిలీట్ మ్యాజిక్ ఇక్కడే జరుగుతుంది
     if (idsToDelete.isNotEmpty) {
-      // ఇది ఆండ్రాయిడ్ ని నేరుగా డిలీట్ చేయమని అడుగుతుంది. (పర్మిషన్ ఇచ్చాక పక్కాగా లేచిపోతాయి)
       await PhotoManager.editor.deleteWithIds(idsToDelete);
     }
 
     if (!mounted) return;
     Navigator.pop(context);
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$successCount/${chosen.length} ఫోటోలు $targetAlbum లో లాక్ అయ్యాయి 🔒')));
+    
+    final msg = skippedCount > 0 
+        ? '$successCount moved to $targetAlbum, $skippedCount skipped (duplicate)'
+        : '$successCount items moved to $targetAlbum 🔒';
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
     setState(_selected.clear);
     await _reload();
   }
@@ -972,45 +907,41 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     final chosen = _items.where((a) => _selected.contains(a.id)).toList();
     if (chosen.isEmpty) return;
 
-    final confirm = await _showConfirmDialog(
-      'డిలీట్ చేయాలా?',
-      'ఈ ${chosen.length} ఫోటోలు గ్యాలరీ నుండి డిలీట్ అవుతాయి, కానీ Vault Bin లో సేఫ్ గా ఉంటాయి.',
-      'Delete',
-    );
-    if (!confirm || !mounted) return;
-
+    // 👈 ఇక్కడ కూడా కన్ఫర్మేషన్ తీసేసాం (ఆండ్రాయిడ్ ఎలాగో అడుగుతుంది)
     showDialog(context: context, barrierDismissible: false, builder: (_) => const Center(child: CircularProgressIndicator()));
 
     final vault = VaultService();
+    final existing = await DatabaseHelper.instance.fetchAll();
     final idsToDelete = <String>[];
     int successCount = 0;
 
     for (final a in chosen) {
+      bool isDup = existing.any((e) => e.originalName == a.title && e.albumName == 'My_Photos' && e.isDeleted == 1);
+      if (isDup) {
+         idsToDelete.add(a.id);
+         continue;
+      }
+
       if (await vault.hideAsset(a, 'My_Photos', trash: true)) {
         successCount++;
-        idsToDelete.add(a.id); // బిన్ లోకి వెళ్ళిన వాటి ఐడీలు నోట్ చేసుకుంటున్నాం
+        idsToDelete.add(a.id); 
       }
     }
 
-    // 👈 ఆండ్రాయిడ్ గ్యాలరీలో పక్కాగా డిలీట్ అవ్వడానికి
     if (idsToDelete.isNotEmpty) {
       await PhotoManager.editor.deleteWithIds(idsToDelete);
     }
 
     if (!mounted) return;
     Navigator.pop(context);
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$successCount ఫోటోలు Vault Bin లోకి వెళ్ళాయి 🗑️')));
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$successCount items moved to Vault Bin 🗑️')));
     setState(_selected.clear);
     await _reload();
   }
 
   void _toggleTheme() {
     HapticFeedback.lightImpact();
-
-    // 1. Save the choice via ThemeProvider (SharedPreferences)
     context.read<ThemeProvider>().toggleTheme();
-
-    // 2. Run the local screen animation accordingly
     setState(() => _light = !_light);
     _light ? _themeCtrl.forward() : _themeCtrl.reverse();
   }
@@ -1034,7 +965,6 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
               if (selecting) {
                 setState(_selected.clear);
               } else if (_fromAlbums) {
-                // came from an album card -> Back goes to the Albums tab
                 setState(() => _fromAlbums = false);
                 _tabs.animateTo(1);
               } else {
@@ -1057,8 +987,6 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
                     ),
                   ),
                   _topBar(p, selecting, mq.padding.top),
-
-                  // ─── BOTTOM DOCK ( Share, Copy, Move, Delete ) ───
                   Positioned(
                     left: 12, right: 12, bottom: mq.padding.bottom + 12,
                     child: AnimatedSwitcher(
@@ -1110,7 +1038,6 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     });
   }
 
-  /// Second tab: device albums as cover cards. Tap one to open it in the photos tab.
   Widget _albumsTab(_P p, MediaQueryData mq) {
     if (!_ready) return Center(child: CircularProgressIndicator(color: p.accent));
     if (_albums.isEmpty) return Center(child: Text('No albums', style: TextStyle(color: p.sub, fontSize: 16)));
@@ -1138,7 +1065,7 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
       child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
         for (var c = 0; c < r.count; c++) ...[
           if (c > 0) const SizedBox(width: _gap),
-          SizedBox(width: L.cell, height: L.cell, child: _Tile(key: ValueKey(_items[r.start + c].id), asset: _items[r.start + c], px: L.thumbPx, selected: _selected.contains(_items[r.start + c].id), selecting: selecting, p: p, live: _live)),
+          SizedBox(width: L.cell, height: L.cell, child: _Tile(key: ValueKey(_items[r.start + c].id), asset: _items[r.start + c], px: L.thumbPx, selected: _selected.contains(_items[r.start + c].id), selecting: selecting, p: p)),
         ],
       ]),
     );
@@ -1197,7 +1124,6 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     return Row(key: const ValueKey('normal'), children: [
       const SizedBox(width: 18),
       Expanded(
-        // 👈 సీక్రెట్ ఎంట్రీ మ్యాజిక్ ఇక్కడే ఉంది!
         child: GestureDetector(
           onTap: _openVaultSecurely, 
           child: Text(
@@ -1207,7 +1133,6 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
           ),
         ),
       ),
-      // 👈 పాత 3 ఐకాన్స్ తీసేసి, ఒకే సింగిల్ 'Settings' బటన్ పెట్టాం
       IconButton(
         icon: Icon(Icons.settings_rounded, color: p.text),
         onPressed: () => _showSettings(context, p),
@@ -1215,6 +1140,7 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
       const SizedBox(width: 4),
     ]);
   }
+
   Widget _selectBar(_P p) {
     return Row(key: const ValueKey('select'), children: [
       IconButton(icon: Icon(Icons.close_rounded, color: p.text), onPressed: () => setState(_selected.clear)),
@@ -1223,11 +1149,10 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
       const SizedBox(width: 4),
     ]);
   }
-  // ─── 1. SECRET VAULT LOCK (Alphanumeric) ───
+
   Future<void> _openVaultSecurely() async {
-    HapticFeedback.heavyImpact(); // Tap cheyagane haptic feel
+    HapticFeedback.heavyImpact(); 
     final sp = await SharedPreferences.getInstance();
-    // 'vault_secret_key' ani kotha peru pettam
     final storedKey = sp.getString('vault_secret_key'); 
     final p = _pal;
     final ctrl = TextEditingController();
@@ -1250,7 +1175,7 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
               children: [
                 TextField(
                   controller: ctrl,
-                  keyboardType: TextInputType.text, // 👈 Alphanumeric kosam text pettam
+                  keyboardType: TextInputType.text, 
                   obscureText: true,
                   autofocus: true,
                   style: TextStyle(color: p.accent, fontSize: 24, letterSpacing: 4, fontWeight: FontWeight.bold),
@@ -1280,18 +1205,17 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
               TextButton(
                 onPressed: () async {
                   final val = ctrl.text.trim();
-                  // Minimum 6 characters rule pettam (Security kosam)
                   if (val.length < 6) {
                     setDialogState(() => error = 'Minimum 6 characters required');
                     return;
                   }
                   
                   if (storedKey == null) {
-                    await sp.setString('vault_secret_key', val); // First time key set chestunnam
+                    await sp.setString('vault_secret_key', val); 
                     Navigator.pop(ctx, true);
                   } else {
                     if (val == storedKey) {
-                      Navigator.pop(ctx, true); // Correct key
+                      Navigator.pop(ctx, true); 
                     } else {
                       setDialogState(() => error = 'Incorrect Key ❌');
                     }
@@ -1308,15 +1232,11 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
       )
     );
 
-    // Key correct aithe Vault open avtundi
     if (res == true && mounted) {
-      _stopLive();
       await Navigator.push(context, MaterialPageRoute(builder: (_) => const AlbumsScreen()));
-      if (_tabs.index == 0) _scheduleLive();
     }
   }
 
-  // ─── 2. SETTINGS MENU ───
   void _showSettings(BuildContext context, _P p) {
     showModalBottomSheet(
       context: context,
@@ -1335,7 +1255,6 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
                   Text('Settings', style: TextStyle(color: p.text, fontSize: 24, fontWeight: FontWeight.w800)),
                   const SizedBox(height: 24),
                   
-                  // Theme Toggle
                   ListTile(
                     contentPadding: EdgeInsets.zero,
                     leading: Icon(_light ? Icons.light_mode_rounded : Icons.dark_mode_rounded, color: p.accent, size: 28),
@@ -1345,12 +1264,11 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
                       activeColor: p.accent,
                       onChanged: (v) {
                         _toggleTheme();
-                        setModalState(() {}); // మోడల్ లోపల UI అప్‌డేట్ అవ్వడానికి
+                        setModalState(() {}); 
                       },
                     ),
                   ),
                   
-                  // Grid Size
                   ListTile(
                     contentPadding: EdgeInsets.zero,
                     leading: Icon(Icons.grid_view_rounded, color: p.accent, size: 28),
@@ -1364,7 +1282,6 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
                       onChanged: (v) async {
                         if (v != null) {
                           setState(() { _gridColumns = v; _layout = null; });
-                          _stopLive(); _scheduleLive(600);
                           final sp = await SharedPreferences.getInstance();
                           await sp.setInt(_kGridKey, v);
                           Navigator.pop(ctx);
@@ -1375,7 +1292,6 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
 
                   const Divider(height: 36),
 
-                  // Statistics
                   Text('Storage Statistics', style: TextStyle(color: p.sub, fontSize: 13, fontWeight: FontWeight.w700, letterSpacing: 0.5)),
                   const SizedBox(height: 16),
                   FutureBuilder<Map<String, String>>(
@@ -1405,7 +1321,6 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
 
                   const Divider(height: 42),
 
-                  // About Section
                   Center(
                     child: Column(
                       children: [
@@ -1424,9 +1339,7 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     );
   }
 
-  // ─── 3. STATS CALCULATOR ───
   Future<Map<String, String>> _getStats() async {
-    // 1. Vault Data Size
     int vaultBytes = 0;
     int vaultCount = 0;
     final vaultItems = await DatabaseHelper.instance.fetchAll();
@@ -1438,10 +1351,8 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
       }
     }
 
-    // 2. Phone Gallery Size
-    int phoneCount = _items.length; // ప్రస్తుతం లోడ్ అయిన ఫోటోలు
+    int phoneCount = _items.length; 
     
-    // Size Format Helper
     String fmt(int b) {
       if (b == 0) return '0 B';
       final u = ['B', 'KB', 'MB', 'GB'];

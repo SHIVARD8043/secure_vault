@@ -8,12 +8,12 @@ import 'package:collection/collection.dart';
 import 'package:photo_view/photo_view.dart';
 import 'package:photo_view/photo_view_gallery.dart';
 import 'package:share_plus/share_plus.dart';
-import 'package:provider/provider.dart'; // NEW: Theme Provider
+import 'package:provider/provider.dart'; 
 import '../core/theme_provider.dart';
 import '../core/vault_service.dart';
 import '../db/database_helper.dart';
 import '../db/vault_item_model.dart';
-import 'video_player_screen.dart'; // NEW: Video Player
+import 'video_player_screen.dart'; 
 
 
 // ════════════════════════════════════════════════════════════════════
@@ -21,11 +21,13 @@ import 'video_player_screen.dart'; // NEW: Video Player
 // ════════════════════════════════════════════════════════════════════
 class _Glass extends StatelessWidget {
   const _Glass({
-    super.key, required this.p, required this.child, this.radius = 24, this.blur = 22, this.border,
+    super.key, this.p, required this.child, this.radius = 24, this.blur = 25, this.color, this.border,
   });
-  final AppPalette p;
+  
+  final AppPalette? p; // 👈 Idi add chesam
   final Widget child;
   final double radius, blur;
+  final Color? color;
   final BoxBorder? border;
 
   @override
@@ -36,7 +38,12 @@ class _Glass extends StatelessWidget {
       child: BackdropFilter(
         filter: ImageFilter.blur(sigmaX: blur, sigmaY: blur),
         child: DecoratedBox(
-          decoration: BoxDecoration(color: p.bar, borderRadius: br, border: border ?? (radius > 0 ? Border.all(color: p.border) : null)),
+          decoration: BoxDecoration(
+            // color pass cheyకపోతే, theme bar color గానీ లేదా డీఫాల్ట్ బ్లాక్ గానీ తీసుకుంటుంది
+            color: color ?? (p != null ? p!.bar : Colors.black.withOpacity(0.45)), 
+            borderRadius: br, 
+            border: border ?? (radius > 0 && p != null ? Border.all(color: p!.border) : null)
+          ),
           child: child,
         ),
       ),
@@ -173,7 +180,7 @@ Future<Map<String, String>> _loadMeta(VaultItem item) async {
     try {
       final buf = await ui.ImmutableBuffer.fromUint8List(await f.readAsBytes());
       final d = await ui.ImageDescriptor.encoded(buf);
-      out['Resolution'] = '${d.width} × ${d.height}  (${(d.width * d.height / 1e6).toStringAsFixed(1)} MP)';
+      out['Resolution'] = '${d.width} × ${d.height}  (${((d.width * d.height) / 1e6).toStringAsFixed(1)} MP)';
       d.dispose(); buf.dispose();
     } catch (_) {}
   } else {
@@ -242,7 +249,6 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
   Future<void> _loadItems() async {
     final allItems = await DatabaseHelper.instance.fetchAll();
     
-    // ── ముఖ్యమైన మార్పు: డమ్మీ ఫోల్డర్లని (type: 'folder') హైడ్ చేస్తున్నాం ──
     final albumItems = allItems.where((i) => 
       i.albumName == widget.albumName && 
       i.isDeleted == 0 &&
@@ -328,7 +334,7 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
       _loadItems();
     }
   }
-  // ── ALBUM PROPERTIES (INFO) ──
+  
   Future<void> _showAlbumStats(BuildContext context, AppPalette p) {
     return showModalBottomSheet<void>(
       context: context, backgroundColor: p.surface, isScrollControlled: true,
@@ -385,12 +391,11 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
       ),
     );
   }
-  // ── RESTORE TO ORIGINAL GALLERY ──
+  
   Future<void> _restoreToGallery() async {
     final chosen = _items.where((i) => _selected.contains(i.id)).toList();
     if (chosen.isEmpty) return;
 
-    // పొరపాటున నొక్కకుండా కన్ఫర్మేషన్ అడుగుతున్నాం
     final confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) {
@@ -409,7 +414,6 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
 
     if (confirm != true || !mounted) return;
 
-    // VaultService లోని ఎక్స్‌పోర్ట్ ఫంక్షన్ ని కాల్ చేస్తున్నాం 
     await _withProgress(context, () => VaultService().exportToGallery(chosen));
     
     if (mounted) {
@@ -463,7 +467,6 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
                                         final sel = _selected.contains(item.id);
                                         final isVideo = item.type == 'video';
                                         
-                                        // ── వీడియో అయితే థంబ్‌నెయిల్, ఫోటో అయితే ఒరిజినల్ ఫైల్ తీసుకుంటున్నాం ──
                                         final imgPath = (isVideo && item.thumbnailPath != null) ? item.thumbnailPath! : item.encryptedPath;
                                         final file = File(imgPath);
 
@@ -472,17 +475,10 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
                                             if (selecting) {
                                               _toggle(item);
                                             } else {
-                                              if (isVideo) {
-                                                // వీడియోని సపరేట్ వీడియో ప్లేయర్ కి పంపుతున్నాం
-                                                await Navigator.push(context, MaterialPageRoute(builder: (_) => VideoPlayerScreen(file: File(item.encryptedPath), title: item.originalName)));
-                                              } else {
-                                                // PhotoViewGallery లో వీడియోలు క్రాష్ అవుతాయి కాబట్టి వాటిని ఫిల్టర్ చేసి పంపుతున్నాం 
-                                                final imgItems = _items.where((e) => e.type != 'video').toList();
-                                                final idx = imgItems.indexWhere((e) => e.id == item.id);
-                                                if (idx != -1) {
-                                                  final changed = await Navigator.push(context, MaterialPageRoute(builder: (_) => PhotoPreviewScreen(items: imgItems, initialIndex: idx, albumName: widget.albumName)));
-                                                  if (changed == true) _loadItems();
-                                                }
+                                              final idx = _items.indexWhere((e) => e.id == item.id);
+                                              if (idx != -1) {
+                                                final changed = await Navigator.push(context, MaterialPageRoute(builder: (_) => PhotoPreviewScreen(items: _items, initialIndex: idx, albumName: widget.albumName)));
+                                                if (changed == true) _loadItems();
                                               }
                                             }
                                           },
@@ -495,7 +491,7 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
                                                   : Container(color: p.bg2, child: Icon(Icons.broken_image, color: p.sub)),
                                             ),
                                             
-                                            // వీడియో అయితే పైన ప్లే బటన్ కనపడాలి
+                                            // 👈 వీడియోకి ప్లే ఐకాన్ కనపడాలి 
                                             if (isVideo)
                                               const Center(child: Icon(Icons.play_circle_fill_rounded, color: Colors.white, size: 36, shadows: [Shadow(color: Colors.black54, blurRadius: 4)])),
                                               
@@ -518,40 +514,43 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
                         ),
             ),
 
-            // Top Glass Bar
+            // Top Glass Bar (Theme-aware for main grid)
             Positioned(
               top: 0, left: 0, right: 0,
-              child: _Glass(
-                p: p, radius: 0, blur: 28, border: Border(bottom: BorderSide(color: p.border)),
-                child: Padding(
-                  padding: EdgeInsets.only(top: mq.padding.top),
-                  child: SizedBox(
-                    height: 56,
-                    child: selecting
-                        ? Row(
-                            children: [
-                              IconButton(icon: Icon(Icons.close_rounded, color: p.text), onPressed: () => setState(() => _selected.clear())),
-                              Expanded(child: Text('${_selected.length} Selected', style: TextStyle(color: p.text, fontSize: 18, fontWeight: FontWeight.bold))),
-                              IconButton(icon: Icon(Icons.select_all_rounded, color: p.text), onPressed: () => setState(() => _selected.length == _items.length ? _selected.clear() : _selected.addAll(_items.map((e) => e.id!)))),
-                              const SizedBox(width: 8),
-                            ],
-                          )
-                        // ఈ కింది విధంగా మార్చు
-                        : Row(
-                            children: [
-                              const SizedBox(width: 8),
-                              IconButton(icon: Icon(Icons.arrow_back_ios_new_rounded, color: p.text, size: 20), onPressed: () => Navigator.pop(context)),
-                              Expanded(child: Text(widget.albumName, style: TextStyle(color: p.text, fontSize: 20, fontWeight: FontWeight.bold))),
-                              
-                              // 👈 ఇక్కడ కొత్తగా Info బటన్ యాడ్ చేశాం 
-                              IconButton(
-                                tooltip: 'Album Info',
-                                icon: Icon(Icons.info_outline_rounded, color: p.accent), 
-                                onPressed: () => _showAlbumStats(context, p)
+              child: ClipRRect(
+                child: BackdropFilter(
+                  filter: ImageFilter.blur(sigmaX: 25, sigmaY: 25),
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(color: p.bar, border: Border(bottom: BorderSide(color: p.border))),
+                    child: Padding(
+                      padding: EdgeInsets.only(top: mq.padding.top),
+                      child: SizedBox(
+                        height: 56,
+                        child: selecting
+                            ? Row(
+                                children: [
+                                  IconButton(icon: Icon(Icons.close_rounded, color: p.text), onPressed: () => setState(() => _selected.clear())),
+                                  Expanded(child: Text('${_selected.length} Selected', style: TextStyle(color: p.text, fontSize: 18, fontWeight: FontWeight.bold))),
+                                  IconButton(icon: Icon(Icons.select_all_rounded, color: p.text), onPressed: () => setState(() => _selected.length == _items.length ? _selected.clear() : _selected.addAll(_items.map((e) => e.id!)))),
+                                  const SizedBox(width: 8),
+                                ],
+                              )
+                            : Row(
+                                children: [
+                                  const SizedBox(width: 8),
+                                  IconButton(icon: Icon(Icons.arrow_back_ios_new_rounded, color: p.text, size: 20), onPressed: () => Navigator.pop(context)),
+                                  Expanded(child: Text(widget.albumName, style: TextStyle(color: p.text, fontSize: 20, fontWeight: FontWeight.bold))),
+                                  
+                                  IconButton(
+                                    tooltip: 'Album Info',
+                                    icon: Icon(Icons.info_outline_rounded, color: p.accent), 
+                                    onPressed: () => _showAlbumStats(context, p)
+                                  ),
+                                  const SizedBox(width: 8),
+                                ],
                               ),
-                              const SizedBox(width: 8),
-                            ],
-                          ),
+                      ),
+                    ),
                   ),
                 ),
               ),
@@ -564,20 +563,26 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
                 duration: const Duration(milliseconds: 260),
                 transitionBuilder: (c, a) => FadeTransition(opacity: a, child: SlideTransition(position: Tween(begin: const Offset(0, 0.6), end: Offset.zero).animate(a), child: c)),
                 child: selecting 
-                  ? _Glass(
+                  ? ClipRRect(
                       key: const ValueKey('vault_actions_bar'),
-                      p: p, radius: 28, blur: 26,
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                          children: [
-                            _ActionBtn(icon: Icons.ios_share_rounded, label: 'Share', color: p.accent, onTap: _shareSelected),
-                            _ActionBtn(icon: Icons.output_rounded, label: 'Unhide', color: p.accent, onTap: _restoreToGallery),
-                            _ActionBtn(icon: Icons.copy_rounded, label: 'Copy', color: p.accent, onTap: () => _copySelected(p)),
-                            _ActionBtn(icon: Icons.drive_file_move_rounded, label: 'Move', color: p.accent, onTap: () => _moveSelected(p)),
-                            _ActionBtn(icon: Icons.delete_outline_rounded, label: 'Bin', color: Colors.redAccent, onTap: _trashSelected),
-                          ],
+                      borderRadius: BorderRadius.circular(28),
+                      child: BackdropFilter(
+                        filter: ImageFilter.blur(sigmaX: 25, sigmaY: 25),
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(color: p.bar),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                              children: [
+                                _ActionBtn(icon: Icons.ios_share_rounded, label: 'Share', color: p.accent, onTap: _shareSelected),
+                                _ActionBtn(icon: Icons.output_rounded, label: 'Unhide', color: p.accent, onTap: _restoreToGallery),
+                                _ActionBtn(icon: Icons.copy_rounded, label: 'Copy', color: p.accent, onTap: () => _copySelected(p)),
+                                _ActionBtn(icon: Icons.drive_file_move_rounded, label: 'Move', color: p.accent, onTap: () => _moveSelected(p)),
+                                _ActionBtn(icon: Icons.delete_outline_rounded, label: 'Bin', color: Colors.redAccent, onTap: _trashSelected),
+                              ],
+                            ),
+                          ),
                         ),
                       ),
                     )
@@ -657,8 +662,10 @@ class _PhotoPreviewScreenState extends State<PhotoPreviewScreen> {
     final p = context.watch<ThemeProvider>().p;
 
     return Scaffold(
-      backgroundColor: p.bg, // 👈 1. ఇక్కడ Colors.black తీసేసి p.bg పెట్టు
+      // 👈 Theme based background
+      backgroundColor: p.bg, 
       extendBodyBehindAppBar: true,
+      extendBody: true,
       body: Stack(
         fit: StackFit.expand,
         children: [
@@ -669,22 +676,37 @@ class _PhotoPreviewScreenState extends State<PhotoPreviewScreen> {
               itemCount: widget.items.length,
               onPageChanged: (i) => setState(() => _index = i),
               
-              // 👈 2. ఇక్కడ కూడా const BoxDecoration(color: Colors.black) తీసేసి ఇలా పెట్టు
+              // 👈 Theme based background for gallery
               backgroundDecoration: BoxDecoration(color: p.bg), 
               
               builder: (_, i) {
                 final item = widget.items[i];
-                return PhotoViewGalleryPageOptions(
-                  imageProvider: ResizeImage.resizeIfNeeded(2400, null, FileImage(File(item.encryptedPath))),
+                final isVideo = item.type == 'video';
+                final imgPath = (isVideo && item.thumbnailPath != null) ? item.thumbnailPath! : item.encryptedPath;
+                
+                return PhotoViewGalleryPageOptions.customChild(
                   heroAttributes: PhotoViewHeroAttributes(tag: 'vault_${item.id}'),
                   minScale: PhotoViewComputedScale.contained,
                   maxScale: PhotoViewComputedScale.covered * 3,
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      Image.file(File(imgPath), fit: BoxFit.contain),
+                      if (isVideo)
+                        Center(
+                          child: GestureDetector(
+                            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => VideoPlayerScreen(file: File(item.encryptedPath), title: item.originalName))),
+                            child: const Icon(Icons.play_circle_fill_rounded, color: Colors.white, size: 80, shadows: [Shadow(color: Colors.black54, blurRadius: 10)]),
+                          ),
+                        ),
+                    ],
+                  ),
                 );
               },
             ),
           ),
 
-          // Top Bar
+          // Top Theme Glass Bar
           Positioned(
             top: 0, left: 0, right: 0,
             child: AnimatedOpacity(
@@ -692,17 +714,18 @@ class _PhotoPreviewScreenState extends State<PhotoPreviewScreen> {
               child: IgnorePointer(
                 ignoring: !_chrome,
                 child: _Glass(
-                  p: p, radius: 0, blur: 20, border: Border(bottom: BorderSide(color: p.border)),
+                  p: p, radius: 0, blur: 25, color: p.bar, // 👈 Theme bar color
+                  border: Border(bottom: BorderSide(color: p.border)),
                   child: Padding(
                     padding: EdgeInsets.only(top: mq.padding.top),
                     child: SizedBox(
                       height: 56,
                       child: Row(
                         children: [
-                          IconButton(icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white, size: 20), onPressed: () => Navigator.pop(context)),
-                          Expanded(child: Text('${_index + 1} / ${widget.items.length}', style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold))),
-                          IconButton(tooltip: 'Details', icon: const Icon(Icons.info_outline_rounded, color: Colors.white), onPressed: () => _showMeta(context, p, _cur)),
-                          if (!widget.trash) IconButton(tooltip: 'More', icon: const Icon(Icons.more_vert_rounded, color: Colors.white), onPressed: () => _showPreviewActions(p)),
+                          IconButton(icon: Icon(Icons.arrow_back_ios_new_rounded, color: p.text, size: 20), onPressed: () => Navigator.pop(context)),
+                          Expanded(child: Text('${_index + 1} / ${widget.items.length}', style: TextStyle(color: p.text, fontSize: 18, fontWeight: FontWeight.bold))),
+                          IconButton(tooltip: 'Details', icon: Icon(Icons.info_outline_rounded, color: p.text), onPressed: () => _showMeta(context, p, _cur)),
+                          if (!widget.trash) IconButton(tooltip: 'More', icon: Icon(Icons.more_vert_rounded, color: p.text), onPressed: () => _showPreviewActions(p)),
                           const SizedBox(width: 4),
                         ],
                       ),
@@ -713,7 +736,7 @@ class _PhotoPreviewScreenState extends State<PhotoPreviewScreen> {
             ),
           ),
 
-          // Bottom Bar
+          // Bottom Theme Glass Bar
           Positioned(
             bottom: 0, left: 0, right: 0,
             child: AnimatedOpacity(
@@ -721,11 +744,12 @@ class _PhotoPreviewScreenState extends State<PhotoPreviewScreen> {
               child: IgnorePointer(
                 ignoring: !_chrome,
                 child: _Glass(
-                  p: p, radius: 0, blur: 20, border: Border(top: BorderSide(color: p.border)),
+                  p: p, radius: 0, blur: 25, color: p.bar, // 👈 Theme bar color
+                  border: Border(top: BorderSide(color: p.border)),
                   child: Padding(
-                    padding: EdgeInsets.only(bottom: mq.padding.bottom),
+                    padding: EdgeInsets.only(bottom: mq.padding.bottom, top: 12),
                     child: SizedBox(
-                      height: 80,
+                      height: 70,
                       child: Row(
                         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                         children: widget.trash ? [

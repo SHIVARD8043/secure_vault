@@ -70,15 +70,20 @@ class BackupService {
   // ─── 2. EXPORT TO DOWNLOADS (Public Folder) ───
   Future<String?> exportToDownloads(File backupZip) async {
     try {
-      // ఆండ్రాయిడ్ స్టోరేజ్ పర్మిషన్స్ చెక్ చేస్తున్నాం
       if (Platform.isAndroid) {
-        final status = await Permission.storage.request();
-        if (!status.isGranted && !await Permission.manageExternalStorage.isGranted) {
-          return null; 
+        // 1. ఆండ్రాయిడ్ 10 మరియు అంతకంటే పాత వాటి కోసం
+        var status = await Permission.storage.request();
+        
+        // 2. ఆండ్రాయిడ్ 11+ లో పాత స్టోరేజ్ పనిచేయదు కాబట్టి All Files Access అడగాలి
+        if (!status.isGranted) {
+          var manageStatus = await Permission.manageExternalStorage.request();
+          if (!manageStatus.isGranted) {
+            print("స్టోరేజ్ పర్మిషన్ ఇవ్వలేదు మావా!");
+            return null; 
+          }
         }
       }
 
-      // ఆండ్రాయిడ్ అఫీషియల్ డౌన్‌లోడ్స్ ఫోల్డర్ పాత్
       final downloadDir = Directory('/storage/emulated/0/Download');
       if (!await downloadDir.exists()) await downloadDir.create(recursive: true);
 
@@ -86,7 +91,6 @@ class BackupService {
       final fileName = 'Vault_Backup_$stamp.zip';
       final destPath = p.join(downloadDir.path, fileName);
 
-      // ఫైల్ ని పబ్లిక్ ఫోల్డర్ కి కాపీ చేసి, ప్రైవేట్ ఫైల్ ని డిలీట్ చేస్తున్నాం (స్టోరేజ్ సేవ్ అవ్వడానికి)
       await backupZip.copy(destPath);
       if (await backupZip.exists()) await backupZip.delete();
 
@@ -96,7 +100,6 @@ class BackupService {
       return null;
     }
   }
-
   // ─── 3. RESTORE FROM ZIP ───
   Future<int> restore(File zip) async {
     final tmp = await getTemporaryDirectory();
