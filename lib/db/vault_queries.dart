@@ -20,16 +20,21 @@ extension VaultQueries on DatabaseHelper {
     return db.rawQuery('''
       SELECT v.albumName AS albumName, COUNT(*) AS cnt,
         (SELECT COALESCE(v2.thumbnailPath, v2.encryptedPath) FROM $_table v2
-          WHERE v2.albumName = v.albumName AND v2.isDeleted = 0
+          WHERE v2.albumName = v.albumName 
+          AND v2.isDeleted = 0 
+          AND v2.type != 'folder' 
+          AND v2.type != 'audio' -- 👈 ఆడియో ఫైల్స్ కవర్ ఫోటోగా రాకుండా ఆపుతున్నాం
           ORDER BY v2.id DESC LIMIT 1) AS cover
-      FROM $_table v WHERE v.isDeleted = 0
+      FROM $_table v WHERE v.isDeleted = 0 AND v.type != 'folder' -- 👈 ఫోల్డర్స్ ని కౌంట్ లోకి రాకుండా ఆపుతున్నాం
       GROUP BY v.albumName ORDER BY MAX(v.id) DESC''');
   }
 
   Future<List<VaultItem>> fetchByAlbum(String album) async {
     final db = await database;
     final rows = await db.query(_table,
-        where: 'albumName = ? AND isDeleted = 0', whereArgs: [album], orderBy: 'id DESC');
+        where: 'albumName = ? AND isDeleted = 0 AND type != ?', 
+        whereArgs: [album, 'folder'], // 👈 డమ్మీ ఫోల్డర్స్ లిస్ట్ లోకి రాకుండా
+        orderBy: 'id DESC');
     return rows.map(_fromMap).toList();
   }
 
@@ -42,22 +47,26 @@ extension VaultQueries on DatabaseHelper {
   String _in(List<int> ids) => List.filled(ids.length, '?').join(',');
 
   Future<void> setDeleted(List<int> ids, bool deleted) async {
+    if (ids.isEmpty) return;
     final db = await database;
     await db.update(_table, {'isDeleted': deleted ? 1 : 0},
         where: 'id IN (${_in(ids)})', whereArgs: ids);
   }
 
   Future<void> moveToAlbum(List<int> ids, String album) async {
+    if (ids.isEmpty) return;
     final db = await database;
     await db.update(_table, {'albumName': album},
         where: 'id IN (${_in(ids)})', whereArgs: ids);
   }
 
   Future<void> removeRows(List<int> ids) async {
+    if (ids.isEmpty) return;
     final db = await database;
     await db.delete(_table, where: 'id IN (${_in(ids)})', whereArgs: ids);
   }
-    Future<List<VaultItem>> fetchAll() async {
+  
+  Future<List<VaultItem>> fetchAll() async {
     final db = await database;
     final rows = await db.query(_table, orderBy: 'id ASC'); // trash items kuda
     return rows.map(_fromMap).toList();

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:file_selector/file_selector.dart';
+import 'package:shared_preferences/shared_preferences.dart'; // Added for sorting
 
 import '../core/theme_provider.dart'; // Theme Provider
 import '../core/backup_service.dart';
@@ -85,11 +86,22 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
   int _binCount = 0;
   bool _loading = true;
   String? _selectedAlbum;
+  int _sortType = 0; // 0: A-Z, 1: Z-A, 2: Item Count
 
   @override
   void initState() {
     super.initState();
-    _loadAlbums();
+    _loadPrefs().then((_) => _loadAlbums());
+  }
+
+  Future<void> _loadPrefs() async {
+    try {
+      final sp = await SharedPreferences.getInstance();
+      final s = sp.getInt('vault_album_sort');
+      if (s != null) _sortType = s;
+    } catch (e) {
+      debugPrint('Load prefs error: $e');
+    }
   }
 
   // ─── ALBUM COVERS (latest item thumbnail per album) ───
@@ -107,7 +119,6 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
         final album = r['albumName'] as String?;
         final thumb = r['thumbnailPath'] as String?;
         if (album == null || thumb == null) continue;
-        // rows are newest first, so first hit per album = latest
         covers.putIfAbsent(album, () => thumb);
       }
     } catch (e) {
@@ -127,8 +138,6 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
         bin++;
       } else {
         albumNames.add(item.albumName);
-
-        // డమ్మీ ఫోల్డర్ ('folder') ని ఫోటో కౌంట్ లోకి తీసుకోకుండా అడ్డుకుంటున్నాం
         if (item.type != 'folder') {
           counts[item.albumName] = (counts[item.albumName] ?? 0) + 1;
         }
@@ -140,12 +149,22 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
 
     final covers = await _loadCovers();
 
+    // 👈 Sorting logic applied here
+    final list = albumNames.toList();
+    if (_sortType == 0) {
+      list.sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+    } else if (_sortType == 1) {
+      list.sort((a, b) => b.toLowerCase().compareTo(a.toLowerCase()));
+    } else if (_sortType == 2) {
+      list.sort((a, b) => (counts[b] ?? 0).compareTo(counts[a] ?? 0));
+    }
+
     if (mounted) {
       setState(() {
         _binCount = bin;
         _albumCounts = counts;
         _albumCovers = covers;
-        _albums = albumNames.toList()..sort();
+        _albums = list;
         _loading = false;
       });
     }
@@ -155,12 +174,10 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
   Future<void> _backup({String? albumName}) async {
     final p = context.read<ThemeProvider>().p;
     
-    // ప్రోగ్రెస్ ని రియల్ టైమ్ లో అప్‌డేట్ చేయడానికి Notifiers వాడుతున్నాం
     final progressVal = ValueNotifier<double>(0.0);
-    final statusText = ValueNotifier<String>('ప్రిపేర్ అవుతోంది...');
+    final statusText = ValueNotifier<String>('Preparing...');
     final dialogState = ValueNotifier<int>(0); // 0: Loading, 1: Success, 2: Error
 
-    // 1. సెంటర్ లో డైలాగ్ ఓపెన్ చేస్తున్నాం
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -170,7 +187,6 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
         content: ValueListenableBuilder<int>(
           valueListenable: dialogState,
           builder: (ctx, state, _) {
-            // ── SUCCESS UI ──
             if (state == 1) {
               return Column(
                 mainAxisSize: MainAxisSize.min,
@@ -179,7 +195,7 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
                   const SizedBox(height: 16),
                   Text('Backup Finished! 🎉', style: TextStyle(color: p.text, fontSize: 20, fontWeight: FontWeight.bold)),
                   const SizedBox(height: 8),
-                  Text(albumName != null ? '$albumName ఆల్బమ్ Downloads ఫోల్డర్ లో సేవ్ అయింది.' : 'మొత్తం బ్యాకప్ Downloads ఫోల్డర్ లో సేవ్ అయింది.', style: TextStyle(color: p.sub, fontSize: 14), textAlign: TextAlign.center),
+                  Text(albumName != null ? 'Album "$albumName" saved to Downloads folder.' : 'Complete backup saved to Downloads folder.', style: TextStyle(color: p.sub, fontSize: 14), textAlign: TextAlign.center),
                   const SizedBox(height: 24),
                   SizedBox(
                     width: double.infinity,
@@ -192,7 +208,6 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
                 ],
               );
             } 
-            // ── ERROR UI ──
             else if (state == 2) {
               return Column(
                 mainAxisSize: MainAxisSize.min,
@@ -218,7 +233,6 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
               );
             }
 
-            // ── LOADING UI (Progress Bar) ──
             return Column(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -231,7 +245,7 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
                   ),
                 ),
                 const SizedBox(height: 20),
-                Text('బ్యాకప్ అవుతోంది...', style: TextStyle(color: p.text, fontSize: 18, fontWeight: FontWeight.bold)),
+                Text('Backing up...', style: TextStyle(color: p.text, fontSize: 18, fontWeight: FontWeight.bold)),
                 const SizedBox(height: 8),
                 ValueListenableBuilder<String>(
                   valueListenable: statusText,
@@ -245,32 +259,30 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
       ),
     );
 
-    // 2. బ్యాక్‌గ్రౌండ్ లో బ్యాకప్ ప్రాసెస్ స్టార్ట్ చేస్తున్నాం
     try {
       final tempZip = await BackupService().createBackup(
         albumName: albumName,
         onProgress: (done, total) {
-          // ఇక్కడి నుంచే ప్రోగ్రెస్ బార్ కి డేటా వెళ్తుంది
           progressVal.value = done / total;
-          statusText.value = '$done / $total ఫైల్స్ సేవ్ అయ్యాయి';
+          statusText.value = '$done / $total files processed';
         },
       );
       
-      statusText.value = 'Downloads లోకి పంపుతోంది...';
-      progressVal.value = 0.0; // ఫైల్ కాపీ అయ్యేటప్పుడు లోడింగ్ తిరుగుతుంది
+      statusText.value = 'Moving to Downloads...';
+      progressVal.value = 0.0;
       
       final savedPath = await BackupService().exportToDownloads(tempZip);
       
       if (savedPath != null) {
-        dialogState.value = 1; // Success స్టేట్ కి మారుస్తున్నాం
+        dialogState.value = 1;
         if (mounted) setState(() => _selectedAlbum = null);
       } else {
-        statusText.value = 'Storage Permission లేదు. యాప్ సెట్టింగ్స్ లో పర్మిషన్ ఇవ్వండి.';
-        dialogState.value = 2; // Error స్టేట్
+        statusText.value = 'Storage permission denied. Please allow in app settings.';
+        dialogState.value = 2;
       }
     } catch (e) {
       statusText.value = e.toString();
-      dialogState.value = 2; // Error స్టేట్
+      dialogState.value = 2;
     }
   }
 
@@ -303,7 +315,7 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
                   const SizedBox(height: 16),
                   Text('Restore Finished!', style: TextStyle(color: p.text, fontSize: 20, fontWeight: FontWeight.bold)),
                   const SizedBox(height: 8),
-                  Text('${restoredCount.value} ఫోటోలు / వీడియోలు రిస్టోర్ అయ్యాయి 🔄', style: TextStyle(color: p.sub, fontSize: 14), textAlign: TextAlign.center),
+                  Text('${restoredCount.value} items restored successfully 🔄', style: TextStyle(color: p.sub, fontSize: 14), textAlign: TextAlign.center),
                   const SizedBox(height: 24),
                   SizedBox(
                     width: double.infinity,
@@ -322,9 +334,9 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
                 const SizedBox(height: 10),
                 CircularProgressIndicator(color: p.accent, strokeWidth: 5),
                 const SizedBox(height: 20),
-                Text('డేటా రిస్టోర్ అవుతోంది...', style: TextStyle(color: p.text, fontSize: 18, fontWeight: FontWeight.bold)),
+                Text('Restoring data...', style: TextStyle(color: p.text, fontSize: 18, fontWeight: FontWeight.bold)),
                 const SizedBox(height: 8),
-                Text('దయచేసి వేచి ఉండండి', style: TextStyle(color: p.sub, fontSize: 14)),
+                Text('Please wait', style: TextStyle(color: p.sub, fontSize: 14)),
                 const SizedBox(height: 10),
               ],
             );
@@ -336,7 +348,7 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
     try {
       final n = await BackupService().restore(File(path));
       restoredCount.value = n;
-      dialogState.value = 1; // Success
+      dialogState.value = 1;
       if (mounted) _loadAlbums();
     } catch (e) {
       if (mounted) Navigator.pop(context);
@@ -368,11 +380,11 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
       builder: (ctx) => AlertDialog(
         backgroundColor: p.surface,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
-        title: Text('కొత్త ఆల్బమ్', style: TextStyle(color: p.text, fontWeight: FontWeight.bold)),
+        title: Text('New Album', style: TextStyle(color: p.text, fontWeight: FontWeight.bold)),
         content: TextField(
           controller: ctrl,
           style: TextStyle(color: p.text),
-          decoration: InputDecoration(hintText: 'ఆల్బమ్ పేరు...', hintStyle: TextStyle(color: p.sub)),
+          decoration: InputDecoration(hintText: 'Album Name...', hintStyle: TextStyle(color: p.sub)),
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
@@ -384,13 +396,11 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
     if (name != null && name.isNotEmpty) {
       try {
         final db = await DatabaseHelper.instance.database;
-
-        // ఆల్బమ్ పేరుని నిలబెట్టడానికి ఒక దాచిన 'డమ్మీ' రికార్డ్ వేస్తున్నాం
         await db.insert('vault_items', {
           'originalName': 'dummy_folder_$name',
-          'encryptedPath': 'dummy', // ఫైల్ పాత్ అక్కర్లేదు
+          'encryptedPath': 'dummy', 
           'thumbnailPath': null,
-          'type': 'folder', // 'image' కాదు కాబట్టి ఫోటోల్లో కనిపించదు
+          'type': 'folder', 
           'albumName': name,
           'addedDate': DateTime.now().toIso8601String(),
           'isDeleted': 0,
@@ -406,7 +416,7 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
   @override
   Widget build(BuildContext context) {
     final mq = MediaQuery.of(context);
-    final p = context.watch<ThemeProvider>().p; // Theme Provider Integration
+    final p = context.watch<ThemeProvider>().p;
     final selecting = _selectedAlbum != null;
 
     return AnnotatedRegion<SystemUiOverlayStyle>(
@@ -421,8 +431,8 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
               Positioned.fill(
                 child: _loading
                     ? Center(child: CircularProgressIndicator(color: p.accent))
-                    : _albums.isEmpty
-                        ? Center(child: Text('Vault ఖాళీగా ఉంది 🔒', style: TextStyle(color: p.sub, fontSize: 18)))
+                    : (_albums.isEmpty && _binCount == 0)
+                        ? Center(child: Text('Vault is empty 🔒', style: TextStyle(color: p.sub, fontSize: 18)))
                         : CustomScrollView(
                             physics: const BouncingScrollPhysics(),
                             slivers: [
@@ -434,6 +444,25 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
                                   ),
                                   delegate: SliverChildBuilderDelegate(
                                     (context, index) {
+                                      // 👈 Bin card logic (rendered at the very end of the grid)
+                                      if (index == _albums.length) {
+                                        return _AlbumCard(
+                                          name: 'Recycle Bin',
+                                          count: _binCount,
+                                          cover: null,
+                                          selected: false,
+                                          selecting: false,
+                                          isBin: true,
+                                          p: p,
+                                          onTap: () {
+                                            if (!selecting) {
+                                              Navigator.push(context, MaterialPageRoute(builder: (_) => const BinScreen())).then((_) => _loadAlbums());
+                                            }
+                                          },
+                                          onLongPress: () {}, // Do nothing for Bin
+                                        );
+                                      }
+
                                       final name = _albums[index];
                                       final isSelected = _selectedAlbum == name;
                                       return _AlbumCard(
@@ -442,6 +471,7 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
                                         cover: _albumCovers[name],
                                         selected: isSelected,
                                         selecting: selecting,
+                                        isBin: false,
                                         p: p,
                                         onTap: () {
                                           if (selecting) {
@@ -456,7 +486,7 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
                                         },
                                       );
                                     },
-                                    childCount: _albums.length,
+                                    childCount: _albums.length + 1, // +1 for the Bin card
                                   ),
                                 ),
                               ),
@@ -489,18 +519,29 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
                                   const SizedBox(width: 8),
                                   IconButton(icon: Icon(Icons.arrow_back_ios_new_rounded, color: p.text, size: 20), onPressed: () => Navigator.pop(context)),
                                   Expanded(child: Text('Secure Vault', style: TextStyle(color: p.text, fontSize: 20, fontWeight: FontWeight.bold, letterSpacing: -0.5))),
-                                  IconButton(
-                                    tooltip: 'Recycle Bin',
-                                    icon: Badge(
-                                      isLabelVisible: _binCount > 0,
-                                      label: Text('$_binCount'),
-                                      backgroundColor: Colors.redAccent,
-                                      child: Icon(Icons.delete_outline_rounded, color: p.text, size: 24),
-                                    ),
-                                    onPressed: () {
-                                      Navigator.push(context, MaterialPageRoute(builder: (_) => const BinScreen())).then((_) => _loadAlbums());
+                                  
+                                  // 👈 Sorting Menu
+                                  PopupMenuButton<int>(
+                                    icon: Icon(Icons.sort_rounded, color: p.text),
+                                    color: p.surface,
+                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                                    initialValue: _sortType,
+                                    onSelected: (val) async {
+                                      if (val != _sortType) {
+                                        setState(() => _sortType = val);
+                                        final sp = await SharedPreferences.getInstance();
+                                        await sp.setInt('vault_album_sort', val);
+                                        _loadAlbums();
+                                      }
                                     },
+                                    itemBuilder: (_) => [
+                                      PopupMenuItem(value: 0, child: Text('Name (A-Z)', style: TextStyle(color: p.text))),
+                                      PopupMenuItem(value: 1, child: Text('Name (Z-A)', style: TextStyle(color: p.text))),
+                                      PopupMenuItem(value: 2, child: Text('Item Count', style: TextStyle(color: p.text))),
+                                    ],
                                   ),
+                                  
+                                  // Backup / Restore Menu
                                   PopupMenuButton<String>(
                                     icon: Icon(Icons.more_vert_rounded, color: p.text),
                                     color: p.surface,
@@ -580,6 +621,7 @@ class _AlbumCard extends StatelessWidget {
     required this.cover,
     required this.selected,
     required this.selecting,
+    required this.isBin,
     required this.p,
     required this.onTap,
     required this.onLongPress,
@@ -589,6 +631,7 @@ class _AlbumCard extends StatelessWidget {
   final String? cover;
   final bool selected;
   final bool selecting;
+  final bool isBin;
   final AppPalette p;
   final VoidCallback onTap;
   final VoidCallback onLongPress;
@@ -618,9 +661,13 @@ class _AlbumCard extends StatelessWidget {
                     children: [
                       ColoredBox(
                         color: p.surface,
-                        child: Icon(Icons.folder_shared_rounded, size: 60, color: selected ? p.accent : p.accent.withValues(alpha: 0.6)),
+                        child: Icon(
+                          isBin ? Icons.delete_outline_rounded : Icons.folder_shared_rounded, 
+                          size: 60, 
+                          color: isBin ? Colors.redAccent.withValues(alpha: 0.8) : (selected ? p.accent : p.accent.withValues(alpha: 0.6))
+                        ),
                       ),
-                      if (coverPath != null && coverPath.isNotEmpty)
+                      if (coverPath != null && coverPath.isNotEmpty && !isBin)
                         Image.file(
                           File(coverPath),
                           fit: BoxFit.cover,
@@ -641,13 +688,13 @@ class _AlbumCard extends StatelessWidget {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(name, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: p.text, fontSize: 16, fontWeight: FontWeight.bold)),
+                          Text(name, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: isBin ? Colors.redAccent : p.text, fontSize: 16, fontWeight: FontWeight.bold)),
                           const SizedBox(height: 2),
-                          Text('$count Photos', style: TextStyle(color: p.sub, fontSize: 12)),
+                          Text(isBin ? (count > 0 ? '$count Items' : 'Empty') : '$count Photos', style: TextStyle(color: p.sub, fontSize: 12)),
                         ],
                       ),
                     ),
-                    if (selecting)
+                    if (selecting && !isBin)
                       Icon(selected ? Icons.check_circle_rounded : Icons.radio_button_unchecked_rounded, color: selected ? p.accent : p.sub, size: 22),
                   ],
                 ),

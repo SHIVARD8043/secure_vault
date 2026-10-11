@@ -3,10 +3,9 @@ import 'dart:math';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:photo_manager/photo_manager.dart';
+import 'package:flutter/foundation.dart';
 import '../db/database_helper.dart';
 import '../db/vault_item_model.dart';
-import '../db/vault_queries.dart';
-import 'package:flutter/foundation.dart';
 
 class VaultService {
   static final _rand = Random();
@@ -41,7 +40,7 @@ class VaultService {
         return false;
       }
 
-      // 2. 👈 అసలైన మ్యాజిక్: వాల్ట్ లోకి వచ్చిన కొత్త ఫైల్ కి పాత డేట్ ని సెట్ చేస్తున్నాం!
+      // 2. అసలైన మ్యాజిక్: వాల్ట్ లోకి వచ్చిన కొత్త ఫైల్ కి పాత డేట్ ని సెట్ చేస్తున్నాం!
       await destFile.setLastModified(originalModified);
       await destFile.setLastAccessed(originalAccessed);
 
@@ -59,7 +58,6 @@ class VaultService {
         type: asset.type == AssetType.video ? 'video' : 'image',
         albumName: album,
         addedDate: asset.createDateTime.toIso8601String(),
-        // 👈 ఇక్కడ డైరెక్ట్ గా కండిషన్ పెట్టేశాం 
         isDeleted: trash ? 1 : 0, 
       );
       await DatabaseHelper.instance.insertItem(item.toMap());
@@ -81,11 +79,21 @@ class VaultService {
     await DatabaseHelper.instance.removeRows(items.map((e) => e.id!).toList());
   }
 
-  /// Puts the photo/video back in the phone gallery, then removes it from the vault.
+  /// Puts the photo/video/audio back in the phone gallery or public folder, then removes it from the vault.
   Future<void> exportToGallery(List<VaultItem> items, {bool removeFromVault = true}) async {
     for (final i in items) {
       if (i.type == 'video') {
         await PhotoManager.editor.saveVideo(File(i.encryptedPath), title: i.originalName);
+      } else if (i.type == 'audio') {
+        // 👈 ఆడియో ఫైల్స్ ని సేఫ్ గా Downloads ఫోల్డర్ లోకి కాపీ చేస్తున్నాం
+        try {
+          final downloadDir = Directory('/storage/emulated/0/Download');
+          if (!await downloadDir.exists()) await downloadDir.create(recursive: true);
+          final dest = p.join(downloadDir.path, i.originalName ?? 'audio_${DateTime.now().millisecondsSinceEpoch}.mp3');
+          await File(i.encryptedPath).copy(dest);
+        } catch (e) {
+          debugPrint('Audio Export Error: $e');
+        }
       } else {
         await PhotoManager.editor.saveImageWithPath(i.encryptedPath, title: i.originalName);
       }

@@ -9,12 +9,15 @@ import 'package:photo_view/photo_view.dart';
 import 'package:photo_view/photo_view_gallery.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:provider/provider.dart'; 
+import 'package:file_selector/file_selector.dart'; //👈 //1. Added File Picker
+import 'package:path_provider/path_provider.dart'; // 👈 2. Added Path Provider
+
 import '../core/theme_provider.dart';
 import '../core/vault_service.dart';
 import '../db/database_helper.dart';
 import '../db/vault_item_model.dart';
 import 'video_player_screen.dart'; 
-
+import 'audio_player_screen.dart'; // 👈 3. Added Audio Player
 
 // ════════════════════════════════════════════════════════════════════
 //  GLASS WIDGET & SHARED BUTTON
@@ -24,7 +27,7 @@ class _Glass extends StatelessWidget {
     super.key, this.p, required this.child, this.radius = 24, this.blur = 25, this.color, this.border,
   });
   
-  final AppPalette? p; // 👈 Idi add chesam
+  final AppPalette? p; 
   final Widget child;
   final double radius, blur;
   final Color? color;
@@ -39,7 +42,6 @@ class _Glass extends StatelessWidget {
         filter: ImageFilter.blur(sigmaX: blur, sigmaY: blur),
         child: DecoratedBox(
           decoration: BoxDecoration(
-            // color pass cheyకపోతే, theme bar color గానీ లేదా డీఫాల్ట్ బ్లాక్ గానీ తీసుకుంటుంది
             color: color ?? (p != null ? p!.bar : Colors.black.withOpacity(0.45)), 
             borderRadius: br, 
             border: border ?? (radius > 0 && p != null ? Border.all(color: p!.border) : null)
@@ -167,7 +169,7 @@ String _fmtSize(int b) {
 Future<Map<String, String>> _loadMeta(VaultItem item) async {
   final f = File(item.encryptedPath);
   final out = <String, String>{};
-  out['Name'] = item.encryptedPath.split(RegExp(r'[\\/]')).last;
+  out['Name'] = item.originalName ?? item.encryptedPath.split(RegExp(r'[\\/]')).last;
   final added = _dateOf(item);
   out['Added'] = added == null ? '-' : DateFormat('EEE, d MMM yyyy • h:mm a').format(added);
   out['Album'] = item.albumName;
@@ -177,12 +179,14 @@ Future<Map<String, String>> _loadMeta(VaultItem item) async {
     out['Size'] = _fmtSize(st.size);
     final ext = out['Name']!.contains('.') ? out['Name']!.split('.').last.toUpperCase() : '-';
     out['Type'] = ext;
-    try {
-      final buf = await ui.ImmutableBuffer.fromUint8List(await f.readAsBytes());
-      final d = await ui.ImageDescriptor.encoded(buf);
-      out['Resolution'] = '${d.width} × ${d.height}  (${((d.width * d.height) / 1e6).toStringAsFixed(1)} MP)';
-      d.dispose(); buf.dispose();
-    } catch (_) {}
+    if (item.type != 'audio') {
+      try {
+        final buf = await ui.ImmutableBuffer.fromUint8List(await f.readAsBytes());
+        final d = await ui.ImageDescriptor.encoded(buf);
+        out['Resolution'] = '${d.width} × ${d.height}  (${((d.width * d.height) / 1e6).toStringAsFixed(1)} MP)';
+        d.dispose(); buf.dispose();
+      } catch (_) {}
+    }
   } else {
     out['Size'] = 'File missing';
   }
@@ -239,6 +243,8 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
   Map<String, List<VaultItem>> _groupedItems = {};
   final Set<int> _selected = {}; 
   bool _loading = true;
+  int _sortType = 0; // 0: Created Date, 1: Modified Date, 2: Size
+  String? _filterType; // null = all, 'video' = only videos, 'image' = only photos, 'audio' = only audio
 
   @override
   void initState() {
@@ -249,11 +255,35 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
   Future<void> _loadItems() async {
     final allItems = await DatabaseHelper.instance.fetchAll();
     
-    final albumItems = allItems.where((i) => 
+    var albumItems = allItems.where((i) => 
       i.albumName == widget.albumName && 
       i.isDeleted == 0 &&
       i.type != 'folder' 
     ).toList();
+
+    if (_filterType != null) {
+      albumItems = albumItems.where((i) => i.type == _filterType).toList();
+    }
+
+    albumItems.sort((a, b) {
+      if (_sortType == 0) {
+        final dA = DateTime.tryParse(a.addedDate ?? '') ?? DateTime.fromMillisecondsSinceEpoch(0);
+        final dB = DateTime.tryParse(b.addedDate ?? '') ?? DateTime.fromMillisecondsSinceEpoch(0);
+        return dB.compareTo(dA);
+      } else if (_sortType == 1) {
+        final fA = File(a.encryptedPath);
+        final fB = File(b.encryptedPath);
+        final dA = fA.existsSync() ? fA.statSync().modified : DateTime.fromMillisecondsSinceEpoch(0);
+        final dB = fB.existsSync() ? fB.statSync().modified : DateTime.fromMillisecondsSinceEpoch(0);
+        return dB.compareTo(dA);
+      } else {
+        final fA = File(a.encryptedPath);
+        final fB = File(b.encryptedPath);
+        final sA = fA.existsSync() ? fA.statSync().size : 0;
+        final sB = fB.existsSync() ? fB.statSync().size : 0;
+        return sB.compareTo(sA);
+      }
+    });
 
     if (mounted) {
       setState(() {
@@ -268,16 +298,121 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
     _groupedItems = groupBy(_items, (VaultItem item) {
       DateTime date = DateTime.now();
       try { if (item.addedDate != null) date = DateTime.tryParse(item.addedDate.toString()) ?? DateTime.now(); } catch (_) {}
+      
+      if (_sortType == 1) {
+        final f = File(item.encryptedPath);
+        if (f.existsSync()) date = f.statSync().modified;
+      }
+
       final now = DateTime.now(), today = DateTime(now.year, now.month, now.day), yesterday = today.subtract(const Duration(days: 1));
       final itemDate = DateTime(date.year, date.month, date.day);
-      if (itemDate == today) return "ఈరోజు (Today)";
-      if (itemDate == yesterday) return "నిన్న (Yesterday)";
+      
+      if (_sortType == 2) {
+        final f = File(item.encryptedPath);
+        final size = f.existsSync() ? f.statSync().size : 0;
+        if (size > 1024 * 1024 * 50) return "Larger than 50MB";
+        if (size > 1024 * 1024 * 10) return "10MB - 50MB";
+        return "Under 10MB";
+      }
+
+      if (itemDate == today) return "Today";
+      if (itemDate == yesterday) return "Yesterday";
       if (date.year == now.year) return DateFormat('MMMM d').format(date);
       return DateFormat('MMMM yyyy').format(date);
     });
   }
 
   void _toggle(VaultItem a) => setState(() { _selected.contains(a.id) ? _selected.remove(a.id) : _selected.add(a.id!); });
+
+  void _showProgressDialog(String title, int total, ValueNotifier<int> progress) {
+    final p = context.read<ThemeProvider>().p;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => PopScope(
+        canPop: false,
+        child: Dialog(
+          backgroundColor: p.surface,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 24),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(color: p.accent),
+                const SizedBox(width: 24),
+                ValueListenableBuilder<int>(
+                  valueListenable: progress,
+                  builder: (_, val, __) => Text(
+                    '$title\n$val / $total',
+                    style: TextStyle(color: p.text, fontSize: 16, fontWeight: FontWeight.w600, height: 1.4),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // 👈 4. Import Audio Logic (Using file_selector)
+  Future<void> _importAudio(AppPalette p) async {
+    try {
+      const XTypeGroup audioTypeGroup = XTypeGroup(
+        label: 'Audio Files',
+        extensions: ['mp3', 'wav', 'm4a', 'aac', 'ogg', 'flac'],
+      );
+      
+      final List<XFile> files = await openFiles(acceptedTypeGroups: [audioTypeGroup]);
+      if (files.isEmpty) return;
+
+      final progress = ValueNotifier<int>(0);
+      _showProgressDialog('Importing Audio...', files.length, progress);
+
+      final db = await DatabaseHelper.instance.database;
+      final dir = await getApplicationDocumentsDirectory();
+      final vaultDir = Directory('${dir.path}/vault_audio');
+      if (!await vaultDir.exists()) await vaultDir.create(recursive: true);
+
+      int successCount = 0;
+      for (int i = 0; i < files.length; i++) {
+        progress.value = i + 1;
+        final filePath = files[i].path;
+        final file = File(filePath);
+        final originalName = files[i].name;
+        final ext = originalName.contains('.') ? originalName.split('.').last : 'mp3';
+        final newName = 'audio_${DateTime.now().microsecondsSinceEpoch}_$i.$ext';
+        final newPath = '${vaultDir.path}/$newName';
+        
+        await file.copy(newPath);
+        
+        await db.insert('vault_items', {
+          'originalName': originalName,
+          'encryptedPath': newPath,
+          'thumbnailPath': null,
+          'type': 'audio',
+          'albumName': widget.albumName,
+          'addedDate': DateTime.now().toIso8601String(),
+          'isDeleted': 0,
+        });
+        
+        try { await file.delete(); } catch (_) {} 
+        successCount++;
+      }
+      
+      if (mounted) {
+        Navigator.pop(context); // Close dialog
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$successCount Audio files imported 🎵')));
+        _loadItems();
+      }
+    } catch (e) {
+      if (mounted) {
+         Navigator.pop(context);
+         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e ❌')));
+      }
+    }
+  }
 
   // ── BOTTOM BAR ACTIONS ──
   Future<void> _shareSelected() async {
@@ -293,37 +428,45 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
     final target = await _pickAlbum(context, 'Copy to', p);
     if (target == null || !mounted) return;
     final chosen = _items.where((i) => _selected.contains(i.id)).toList();
-    final ok = await _withProgress(context, () async {
-      final db = await DatabaseHelper.instance.database;
-      var n = 0;
-      for (final it in chosen) { if (await _copyItem(db, it, target)) n++; }
-      return n;
-    });
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$ok/${chosen.length} copied to $target 📄')));
-      setState(() => _selected.clear());
-      _loadItems();
+    
+    final progress = ValueNotifier<int>(0);
+    _showProgressDialog('Copying...', chosen.length, progress);
+    
+    final db = await DatabaseHelper.instance.database;
+    int successCount = 0;
+    for (int i = 0; i < chosen.length; i++) {
+      progress.value = i + 1;
+      if (await _copyItem(db, chosen[i], target)) successCount++;
     }
+
+    if (!mounted) return;
+    Navigator.pop(context); 
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$successCount/${chosen.length} copied to $target 📄')));
+    setState(() => _selected.clear());
+    _loadItems();
   }
 
   Future<void> _moveSelected(AppPalette p) async {
     final target = await _pickAlbum(context, 'Move to', p, exclude: widget.albumName);
     if (target == null || !mounted) return;
     final chosen = _items.where((i) => _selected.contains(i.id)).toList();
-    final ok = await _withProgress(context, () async {
-      final db = await DatabaseHelper.instance.database;
-      var n = 0;
-      for (final it in chosen) {
-        await db.update('vault_items', {'albumName': target}, where: 'id = ?', whereArgs: [it.id]);
-        n++;
-      }
-      return n;
-    });
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$ok/${chosen.length} moved to $target 🚀')));
-      setState(() => _selected.clear());
-      _loadItems();
+
+    final progress = ValueNotifier<int>(0);
+    _showProgressDialog('Moving...', chosen.length, progress);
+
+    final db = await DatabaseHelper.instance.database;
+    int successCount = 0;
+    for (int i = 0; i < chosen.length; i++) {
+      progress.value = i + 1;
+      await db.update('vault_items', {'albumName': target}, where: 'id = ?', whereArgs: [chosen[i].id]);
+      successCount++;
     }
+
+    if (!mounted) return;
+    Navigator.pop(context);
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$successCount/${chosen.length} moved to $target 🚀')));
+    setState(() => _selected.clear());
+    _loadItems();
   }
 
   Future<void> _trashSelected() async {
@@ -335,30 +478,34 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
     }
   }
   
-  Future<void> _showAlbumStats(BuildContext context, AppPalette p) {
-    return showModalBottomSheet<void>(
+  Future<String?> _showAlbumStats(BuildContext context, AppPalette p) {
+    return showModalBottomSheet<String>(
       context: context, backgroundColor: p.surface, isScrollControlled: true,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
       builder: (_) => FutureBuilder<Map<String, String>>(
         future: () async {
-          int pCount = 0, vCount = 0, pSize = 0, vSize = 0;
-          for (final item in _items) {
+          final allItems = await DatabaseHelper.instance.fetchAll();
+          final baseItems = allItems.where((i) => i.albumName == widget.albumName && i.isDeleted == 0 && i.type != 'folder').toList();
+          
+          int pCount = 0, vCount = 0, aCount = 0, pSize = 0, vSize = 0, aSize = 0;
+          for (final item in baseItems) {
             final f = File(item.encryptedPath);
             int size = 0;
             if (await f.exists()) size = (await f.stat()).size;
             
             if (item.type == 'video') {
-              vCount++;
-              vSize += size;
+              vCount++; vSize += size;
+            } else if (item.type == 'audio') {
+              aCount++; aSize += size;
             } else {
-              pCount++;
-              pSize += size;
+              pCount++; pSize += size;
             }
           }
           return {
             'Photos': '$pCount items  •  ${_fmtSize(pSize)}',
             'Videos': '$vCount items  •  ${_fmtSize(vSize)}',
-            'Total Size': _fmtSize(pSize + vSize),
+            'Audios': '$aCount items  •  ${_fmtSize(aSize)}',
+            'Total Size': _fmtSize(pSize + vSize + aSize),
           };
         }(),
         builder: (ctx, snap) {
@@ -372,17 +519,29 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
                       Text('${widget.albumName} Info', style: TextStyle(color: p.text, fontSize: 20, fontWeight: FontWeight.w800)),
                       const SizedBox(height: 20),
                       for (final e in m.entries)
-                        Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 10),
-                          child: Row(children: [
-                            Icon(
-                              e.key == 'Photos' ? Icons.image_outlined : e.key == 'Videos' ? Icons.play_circle_outline : Icons.storage_rounded, 
-                              color: p.accent, size: 24
-                            ),
-                            const SizedBox(width: 12),
-                            SizedBox(width: 100, child: Text(e.key, style: TextStyle(color: p.sub, fontSize: 15, fontWeight: FontWeight.w600))),
-                            Expanded(child: Text(e.value, style: TextStyle(color: p.text, fontSize: 16, fontWeight: FontWeight.w700), textAlign: TextAlign.right)),
-                          ]),
+                        GestureDetector(
+                          onTap: () {
+                            if (e.key == 'Videos') Navigator.pop(ctx, 'video');
+                            else if (e.key == 'Photos') Navigator.pop(ctx, 'image');
+                            else if (e.key == 'Audios') Navigator.pop(ctx, 'audio');
+                            else Navigator.pop(ctx, 'all');
+                          },
+                          behavior: HitTestBehavior.opaque,
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 10),
+                            child: Row(children: [
+                              Icon(
+                                e.key == 'Photos' ? Icons.image_outlined : 
+                                e.key == 'Videos' ? Icons.play_circle_outline : 
+                                e.key == 'Audios' ? Icons.audiotrack_rounded : 
+                                Icons.storage_rounded, 
+                                color: p.accent, size: 24
+                              ),
+                              const SizedBox(width: 12),
+                              SizedBox(width: 100, child: Text(e.key, style: TextStyle(color: p.sub, fontSize: 15, fontWeight: FontWeight.w600))),
+                              Expanded(child: Text(e.value, style: TextStyle(color: p.text, fontSize: 16, fontWeight: FontWeight.w700), textAlign: TextAlign.right)),
+                            ]),
+                          ),
                         ),
                     ]),
             ),
@@ -403,7 +562,7 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
         return AlertDialog(
           backgroundColor: p.surface, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
           title: Text('Unhide Photos?', style: TextStyle(color: p.text, fontWeight: FontWeight.bold)),
-          content: Text('ఈ ${chosen.length} ఐటెమ్స్ మళ్ళీ మీ ఫోన్ పబ్లిక్ గ్యాలరీలోకి వెళ్లిపోతాయి. కన్ఫర్మ్ చేయాలా?', style: TextStyle(color: p.sub)),
+          content: Text('These ${chosen.length} items will be moved back to public gallery. Confirm?', style: TextStyle(color: p.sub)),
           actions: [
             TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text('Cancel', style: TextStyle(color: p.text))),
             TextButton(onPressed: () => Navigator.pop(ctx, true), child: Text('Unhide', style: TextStyle(color: p.accent, fontWeight: FontWeight.bold))),
@@ -439,7 +598,7 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
               child: _loading
                   ? Center(child: CircularProgressIndicator(color: p.accent))
                   : _items.isEmpty
-                      ? Center(child: Text('ఆల్బమ్ ఖాళీగా ఉంది', style: TextStyle(color: p.sub, fontSize: 16)))
+                      ? Center(child: Text('Album is empty', style: TextStyle(color: p.sub, fontSize: 16)))
                       : CustomScrollView(
                           physics: const BouncingScrollPhysics(),
                           slivers: [
@@ -456,51 +615,113 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
                                   ),
                                 ),
                                 SliverPadding(
-                                  padding: const EdgeInsets.symmetric(horizontal: 2),
+                                  padding: const EdgeInsets.symmetric(horizontal: 4),
                                   sliver: SliverGrid(
                                     gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                                      crossAxisCount: 3, crossAxisSpacing: 2, mainAxisSpacing: 2
+                                      crossAxisCount: 3, crossAxisSpacing: 3, mainAxisSpacing: 3
                                     ),
                                     delegate: SliverChildBuilderDelegate(
                                       (context, index) {
                                         final item = itemsInGroup[index];
                                         final sel = _selected.contains(item.id);
                                         final isVideo = item.type == 'video';
+                                        final isAudio = item.type == 'audio'; 
                                         
                                         final imgPath = (isVideo && item.thumbnailPath != null) ? item.thumbnailPath! : item.encryptedPath;
                                         final file = File(imgPath);
 
+                                        // 👈 5. Updated Tile Rendering for Audio
+                                        final framed = DecoratedBox(
+                                          decoration: BoxDecoration(color: p.glass, borderRadius: BorderRadius.circular(11), border: Border.all(color: p.border)),
+                                          child: Padding(
+                                            padding: const EdgeInsets.all(1.5),
+                                            child: ClipRRect(
+                                              borderRadius: BorderRadius.circular(9.5),
+                                              child: Stack(fit: StackFit.expand, children: [
+                                                
+                                                isAudio 
+                                                  ? Container(
+                                                      color: p.surface,
+                                                      child: Column(
+                                                        mainAxisAlignment: MainAxisAlignment.center,
+                                                        children: [
+                                                          Icon(Icons.music_note_rounded, color: p.accent, size: 40),
+                                                          const SizedBox(height: 8),
+                                                          Padding(
+                                                            padding: const EdgeInsets.symmetric(horizontal: 8),
+                                                            child: Text(
+                                                              item.originalName ?? 'Audio File',
+                                                              maxLines: 2,
+                                                              overflow: TextOverflow.ellipsis,
+                                                              textAlign: TextAlign.center,
+                                                              style: TextStyle(color: p.text, fontSize: 11, fontWeight: FontWeight.bold),
+                                                            ),
+                                                          )
+                                                        ],
+                                                      ),
+                                                    )
+                                                  : Hero(
+                                                      tag: 'vault_${item.id}',
+                                                      child: file.existsSync()
+                                                          ? Image.file(file, fit: BoxFit.cover, gaplessPlayback: true)
+                                                          : Container(color: p.bg2, child: Icon(Icons.broken_image, color: p.sub)),
+                                                    ),
+                                                
+                                                if (isVideo)
+                                                  Positioned(
+                                                    right: 6, bottom: 6,
+                                                    child: Container(
+                                                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                                                      decoration: BoxDecoration(color: Colors.black.withOpacity(0.75), borderRadius: BorderRadius.circular(6)),
+                                                      child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                                                        Icon(Icons.play_arrow_rounded, color: Colors.white, size: 14),
+                                                        SizedBox(width: 4),
+                                                        Text('VIDEO', style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold, letterSpacing: 0.5)),
+                                                      ]),
+                                                    ),
+                                                  ),
+                                                  
+                                                AnimatedContainer(duration: const Duration(milliseconds: 180), color: sel ? p.accent.withOpacity(0.22) : Colors.transparent),
+                                                if (sel)
+                                                  Positioned(
+                                                    top: 7, left: 7,
+                                                    child: AnimatedContainer(
+                                                      duration: const Duration(milliseconds: 180),
+                                                      width: 24, height: 24,
+                                                      decoration: BoxDecoration(shape: BoxShape.circle, color: p.accent),
+                                                      child: const Icon(Icons.check_rounded, size: 16, color: Colors.white),
+                                                    ),
+                                                  ),
+                                              ]),
+                                            ),
+                                          ),
+                                        );
+
                                         return GestureDetector(
+                                          behavior: HitTestBehavior.opaque,
                                           onTap: () async {
                                             if (selecting) {
                                               _toggle(item);
                                             } else {
-                                              final idx = _items.indexWhere((e) => e.id == item.id);
-                                              if (idx != -1) {
-                                                final changed = await Navigator.push(context, MaterialPageRoute(builder: (_) => PhotoPreviewScreen(items: _items, initialIndex: idx, albumName: widget.albumName)));
-                                                if (changed == true) _loadItems();
+                                              // 👈 6. Opening Audio Player 
+                                              if (isAudio) {
+                                                await Navigator.push(context, MaterialPageRoute(builder: (_) => AudioPlayerScreen(file: File(item.encryptedPath), title: item.originalName ?? 'Audio')));
+                                              } else {
+                                                // Exclude audios for Photo Gallery Swiping to avoid crash
+                                                final imgItems = _items.where((e) => e.type != 'audio').toList();
+                                                final idx = imgItems.indexWhere((e) => e.id == item.id);
+                                                if (idx != -1) {
+                                                  final changed = await Navigator.push(context, MaterialPageRoute(builder: (_) => PhotoPreviewScreen(items: imgItems, initialIndex: idx, albumName: widget.albumName)));
+                                                  if (changed == true) _loadItems();
+                                                }
                                               }
                                             }
                                           },
                                           onLongPress: () { HapticFeedback.mediumImpact(); _toggle(item); },
-                                          child: Stack(fit: StackFit.expand, children: [
-                                            Hero(
-                                              tag: 'vault_${item.id}',
-                                              child: file.existsSync()
-                                                  ? Image.file(file, fit: BoxFit.cover)
-                                                  : Container(color: p.bg2, child: Icon(Icons.broken_image, color: p.sub)),
-                                            ),
-                                            
-                                            // 👈 వీడియోకి ప్లే ఐకాన్ కనపడాలి 
-                                            if (isVideo)
-                                              const Center(child: Icon(Icons.play_circle_fill_rounded, color: Colors.white, size: 36, shadows: [Shadow(color: Colors.black54, blurRadius: 4)])),
-                                              
-                                            if (sel)
-                                              Container(
-                                                color: p.accent.withValues(alpha: 0.4), alignment: Alignment.bottomRight, padding: const EdgeInsets.all(4),
-                                                child: const Icon(Icons.check_circle, color: Colors.white),
-                                              ),
-                                          ]),
+                                          child: AnimatedScale(
+                                            scale: sel ? 0.86 : 1, duration: const Duration(milliseconds: 200), curve: Curves.easeOutCubic,
+                                            child: framed,
+                                          ),
                                         );
                                       },
                                       childCount: itemsInGroup.length,
@@ -514,7 +735,7 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
                         ),
             ),
 
-            // Top Glass Bar (Theme-aware for main grid)
+            // Top Glass Bar
             Positioned(
               top: 0, left: 0, right: 0,
               child: ClipRRect(
@@ -541,10 +762,41 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
                                   IconButton(icon: Icon(Icons.arrow_back_ios_new_rounded, color: p.text, size: 20), onPressed: () => Navigator.pop(context)),
                                   Expanded(child: Text(widget.albumName, style: TextStyle(color: p.text, fontSize: 20, fontWeight: FontWeight.bold))),
                                   
+                                  // 👈 Import Audio Button
+                                  IconButton(
+                                    tooltip: 'Import Audio',
+                                    icon: Icon(Icons.audio_file_rounded, color: p.accent), 
+                                    onPressed: () => _importAudio(p),
+                                  ),
+
+                                  PopupMenuButton<int>(
+                                    icon: Icon(Icons.sort_rounded, color: p.text),
+                                    color: p.surface,
+                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                                    initialValue: _sortType,
+                                    onSelected: (val) {
+                                      if (val != _sortType) {
+                                        setState(() => _sortType = val);
+                                        _loadItems();
+                                      }
+                                    },
+                                    itemBuilder: (_) => [
+                                      PopupMenuItem(value: 0, child: Text('Created Date', style: TextStyle(color: p.text))),
+                                      PopupMenuItem(value: 1, child: Text('Modified Date', style: TextStyle(color: p.text))),
+                                      PopupMenuItem(value: 2, child: Text('Size', style: TextStyle(color: p.text))),
+                                    ],
+                                  ),
+
                                   IconButton(
                                     tooltip: 'Album Info',
-                                    icon: Icon(Icons.info_outline_rounded, color: p.accent), 
-                                    onPressed: () => _showAlbumStats(context, p)
+                                    icon: Icon(_filterType != null ? Icons.filter_alt_rounded : Icons.info_outline_rounded, color: _filterType != null ? p.accent : p.text), 
+                                    onPressed: () async {
+                                      final res = await _showAlbumStats(context, p);
+                                      if (res != null) {
+                                        setState(() => _filterType = res == 'all' ? null : res);
+                                        _loadItems();
+                                      }
+                                    }
                                   ),
                                   const SizedBox(width: 8),
                                 ],
@@ -662,7 +914,6 @@ class _PhotoPreviewScreenState extends State<PhotoPreviewScreen> {
     final p = context.watch<ThemeProvider>().p;
 
     return Scaffold(
-      // 👈 Theme based background
       backgroundColor: p.bg, 
       extendBodyBehindAppBar: true,
       extendBody: true,
@@ -671,38 +922,36 @@ class _PhotoPreviewScreenState extends State<PhotoPreviewScreen> {
         children: [
           GestureDetector(
             onTap: () => setState(() => _chrome = !_chrome),
-            child: PhotoViewGallery.builder(
-              pageController: _pc,
-              itemCount: widget.items.length,
-              onPageChanged: (i) => setState(() => _index = i),
-              
-              // 👈 Theme based background for gallery
-              backgroundDecoration: BoxDecoration(color: p.bg), 
-              
-              builder: (_, i) {
-                final item = widget.items[i];
-                final isVideo = item.type == 'video';
-                final imgPath = (isVideo && item.thumbnailPath != null) ? item.thumbnailPath! : item.encryptedPath;
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                PhotoViewGallery.builder(
+                  pageController: _pc,
+                  itemCount: widget.items.length,
+                  onPageChanged: (i) => setState(() => _index = i),
+                  backgroundDecoration: BoxDecoration(color: p.bg), 
+                  builder: (_, i) {
+                    final item = widget.items[i];
+                    final isVideo = item.type == 'video';
+                    final imgPath = (isVideo && item.thumbnailPath != null) ? item.thumbnailPath! : item.encryptedPath;
+                    
+                    return PhotoViewGalleryPageOptions(
+                      imageProvider: FileImage(File(imgPath)),
+                      heroAttributes: PhotoViewHeroAttributes(tag: 'vault_${item.id}'),
+                      minScale: PhotoViewComputedScale.contained,
+                      maxScale: PhotoViewComputedScale.covered * 3,
+                    );
+                  },
+                ),
                 
-                return PhotoViewGalleryPageOptions.customChild(
-                  heroAttributes: PhotoViewHeroAttributes(tag: 'vault_${item.id}'),
-                  minScale: PhotoViewComputedScale.contained,
-                  maxScale: PhotoViewComputedScale.covered * 3,
-                  child: Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      Image.file(File(imgPath), fit: BoxFit.contain),
-                      if (isVideo)
-                        Center(
-                          child: GestureDetector(
-                            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => VideoPlayerScreen(file: File(item.encryptedPath), title: item.originalName))),
-                            child: const Icon(Icons.play_circle_fill_rounded, color: Colors.white, size: 80, shadows: [Shadow(color: Colors.black54, blurRadius: 10)]),
-                          ),
-                        ),
-                    ],
+                if (_cur.type == 'video')
+                  Center(
+                    child: GestureDetector(
+                      onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => VideoPlayerScreen(file: File(_cur.encryptedPath), title: _cur.originalName))),
+                      child: const Icon(Icons.play_circle_fill_rounded, color: Colors.white, size: 80, shadows: [Shadow(color: Colors.black54, blurRadius: 10)]),
+                    ),
                   ),
-                );
-              },
+              ],
             ),
           ),
 
@@ -714,7 +963,7 @@ class _PhotoPreviewScreenState extends State<PhotoPreviewScreen> {
               child: IgnorePointer(
                 ignoring: !_chrome,
                 child: _Glass(
-                  p: p, radius: 0, blur: 25, color: p.bar, // 👈 Theme bar color
+                  p: p, radius: 0, blur: 25, color: p.bar, 
                   border: Border(bottom: BorderSide(color: p.border)),
                   child: Padding(
                     padding: EdgeInsets.only(top: mq.padding.top),
@@ -744,7 +993,7 @@ class _PhotoPreviewScreenState extends State<PhotoPreviewScreen> {
               child: IgnorePointer(
                 ignoring: !_chrome,
                 child: _Glass(
-                  p: p, radius: 0, blur: 25, color: p.bar, // 👈 Theme bar color
+                  p: p, radius: 0, blur: 25, color: p.bar,
                   border: Border(top: BorderSide(color: p.border)),
                   child: Padding(
                     padding: EdgeInsets.only(bottom: mq.padding.bottom, top: 12),

@@ -256,12 +256,11 @@ class _Tile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // 👈 1. థంబ్‌నెయిల్ డీకోడర్ ఫెయిల్ అయినా యాప్ క్రాష్ అవ్వకుండా 'format' సెట్ చేశాం
     final provider = AssetEntityImageProvider(
       asset, 
       isOriginal: false, 
       thumbnailSize: ThumbnailSize.square(px),
-      thumbnailFormat: ThumbnailFormat.jpeg, // Glide క్రాష్ అవ్వకుండా Force JPEG
+      thumbnailFormat: ThumbnailFormat.jpeg,
     );
     
     final isVideo = asset.type == AssetType.video;
@@ -277,7 +276,6 @@ class _Tile extends StatelessWidget {
               image: provider, fit: BoxFit.cover, gaplessPlayback: true,
               frameBuilder: (c, child, frame, sync) => sync ? child : AnimatedOpacity(
                   opacity: frame == null ? 0 : 1, duration: const Duration(milliseconds: 220), child: child),
-              // 👈 2. గ్లైడ్ (Glide) ఎర్రర్ త్రో చేసినా క్రాష్ అవ్వకుండా సేఫ్ గా డీఫాల్ట్ ఐకాన్ చూపిస్తుంది 
               errorBuilder: (context, error, stackTrace) {
                 return ColoredBox(
                   color: p.surface,
@@ -473,6 +471,7 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
   static const _pageSize = 120;
   static const _hPad = 4.0, _gap = 3.0, _headerH = 58.0;
   static const _kGridKey = 'home_grid_cols';
+  static const _kSortKey = 'home_sort_type';
 
   final _scroll = ScrollController();
   final List<AssetEntity> _items = [];
@@ -486,6 +485,7 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
   bool _hasMore = true, _loading = false, _ready = false;
   int _gen = 0;
   int _gridColumns = 3;
+  int _sortType = 0; // 0: Created Date, 1: Modified Date
   _Layout? _layout;
   Future<void>? _loadAllFuture;
 
@@ -528,6 +528,9 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
       final sp = await SharedPreferences.getInstance();
       final c = sp.getInt(_kGridKey);
       if (c != null && c >= 2 && c <= 8) _gridColumns = c;
+      
+      final s = sp.getInt(_kSortKey);
+      if (s != null) _sortType = s;
     } catch (e) {
       debugPrint('Load prefs failed: $e');
     }
@@ -552,7 +555,14 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     if (!ps.isAuth) { PhotoManager.openSetting(); return; }
     final albums = await PhotoManager.getAssetPathList(
       type: RequestType.image | RequestType.video,
-      filterOption: FilterOptionGroup(orders: [const OrderOption(type: OrderOptionType.createDate, asc: false)]),
+      filterOption: FilterOptionGroup(
+        orders: [
+          OrderOption(
+            type: _sortType == 0 ? OrderOptionType.createDate : OrderOptionType.updateDate, 
+            asc: false
+          )
+        ]
+      ),
     );
     if (!mounted || gen != _gen) return;
 
@@ -584,8 +594,11 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     if (!mounted || gen != _gen) return;
     setState(() {
       _items..clear()..addAll(first);
-      // 👈 2. పక్కా సార్టింగ్ లాజిక్ ఇక్కడే ఉంది 
-      _items.sort((a, b) => b.createDateTime.compareTo(a.createDateTime));
+      _items.sort((a, b) {
+        return _sortType == 0 
+            ? b.createDateTime.compareTo(a.createDateTime)
+            : b.modifiedDateTime.compareTo(a.modifiedDateTime);
+      });
       _hasMore = first.length == want;
       _loadAllFuture = null;
       _loading = false;
@@ -603,7 +616,11 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
       if (!mounted || gen != _gen) return;
       setState(() {
         _items.addAll(batch);
-        _items.sort((a, b) => b.createDateTime.compareTo(a.createDateTime)); // 👈 సార్టింగ్ అప్డేట్
+        _items.sort((a, b) {
+          return _sortType == 0 
+              ? b.createDateTime.compareTo(a.createDateTime)
+              : b.modifiedDateTime.compareTo(a.modifiedDateTime);
+        });
         if (batch.length < size) _hasMore = false;
         _regroup();
       });
@@ -623,10 +640,11 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     final now = DateTime.now(), today = DateTime(now.year, now.month, now.day), yesterday = today.subtract(const Duration(days: 1));
     String? lastKey;
     for (var i = 0; i < _items.length; i++) {
-      final a = _items[i], d = a.createDateTime, day = DateTime(d.year, d.month, d.day);
+      final a = _items[i];
+      final d = _sortType == 0 ? a.createDateTime : a.modifiedDateTime;
+      final day = DateTime(d.year, d.month, d.day);
       final String key = day == today ? 'T' : day == yesterday ? 'Y' : d.year == now.year ? 'd${day.millisecondsSinceEpoch}' : 'm${d.year}-${d.month}';
       if (key != lastKey) {
-        // 👈 5. ప్యూర్ ఇంగ్లీష్ టెక్స్ట్
         final label = key == 'T' ? "Today" : key == 'Y' ? "Yesterday" : d.year == now.year ? DateFormat('EEE, MMM d').format(d) : DateFormat('MMMM yyyy').format(d);
         _groups.add(_Group(label, i, d.year));
         lastKey = key;
@@ -663,7 +681,6 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     _sel(() => all ? _selected.removeAll(ids) : _selected.addAll(ids));
   }
 
-  // 👈 3. పక్కా ట్యాప్ టార్గెట్ ఫిక్స్ (గ్యాప్ లో నొక్కితే ఇగ్నోర్ చేస్తుంది)
   (_Row, int)? _hit(Offset local) {
     final L = _layout;
     if (L == null || !_scroll.hasClients || L.rows.isEmpty) return null;
@@ -683,7 +700,6 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     final col = (colX / (L.cell + _gap)).floor();
     final rem = colX % (L.cell + _gap);
     
-    // ఫోటో కరెక్ట్ గా ఉన్న స్పేస్ లో నొక్కితేనే తీసుకుంటుంది, ఖాళీ ప్లేస్ లో నొక్కితే ఇగ్నోర్
     if (col < 0 || col >= L.cols || col >= r.count || rem > L.cell) return null;
     
     return (r, r.start + col);
@@ -803,6 +819,39 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     );
   }
 
+  // 👈 ప్రోగ్రెస్ చూపించడానికి ఒక చిన్న హెల్పర్ డైలాగ్
+  void _showProgressDialog(String title, int total, ValueNotifier<int> progress) {
+    final p = _pal;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => PopScope(
+        canPop: false,
+        child: Dialog(
+          backgroundColor: p.surface,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 24),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(color: p.accent),
+                const SizedBox(width: 24),
+                ValueListenableBuilder<int>(
+                  valueListenable: progress,
+                  builder: (_, val, __) => Text(
+                    '$title\n$val / $total',
+                    style: TextStyle(color: p.text, fontSize: 16, fontWeight: FontWeight.w600, height: 1.4),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Future<void> _shareSelected() async {
     final chosen = _items.where((a) => _selected.contains(a.id)).toList();
     if (chosen.isEmpty) return;
@@ -822,14 +871,14 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     }
   }
 
-  // 👈 6. స్కిప్ డూప్లికేట్స్ లాజిక్ యాడ్ చేసాం
   Future<void> _copySelectedToVault() async {
     final chosen = _items.where((a) => _selected.contains(a.id)).toList();
     if (chosen.isEmpty) return;
     final targetAlbum = await _showAlbumPicker('Copy to Vault');
     if (targetAlbum == null || !mounted) return;
 
-    showDialog(context: context, barrierDismissible: false, builder: (_) => const Center(child: CircularProgressIndicator()));
+    final progress = ValueNotifier<int>(0);
+    _showProgressDialog('Copying items...', chosen.length, progress);
     
     final vault = VaultService();
     final existing = await DatabaseHelper.instance.fetchAll();
@@ -837,8 +886,10 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     int successCount = 0;
     int skippedCount = 0;
 
-    for (final a in chosen) {
-      // చెక్: సేమ్ పేరు, సేమ్ ఆల్బమ్ లో ఆల్రెడీ ఉంటే కాపీ స్కిప్ అవుతుంది 
+    for (int i = 0; i < chosen.length; i++) {
+      final a = chosen[i];
+      progress.value = i + 1; // 👈 ప్రోగ్రెస్ నంబర్ అప్‌డేట్
+      
       bool isDup = existing.any((e) => e.originalName == a.title && e.albumName == targetAlbum && e.isDeleted == 0);
       if (isDup) {
         skippedCount++;
@@ -849,7 +900,7 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     }
 
     if (!mounted) return;
-    Navigator.pop(context);
+    Navigator.pop(context); // Close Progress Dialog
     
     final msg = skippedCount > 0 
         ? '$successCount copied to $targetAlbum, $skippedCount skipped (duplicate)'
@@ -858,7 +909,6 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     setState(_selected.clear);
   }
 
-  // 👈 4. మూవ్ కి కన్ఫర్మేషన్ తీసేసి డైరెక్ట్ గా డిలీట్ (+ స్కిప్ డూప్లికేట్స్)
   Future<void> _moveSelectedToVault() async {
     final chosen = _items.where((a) => _selected.contains(a.id)).toList();
     if (chosen.isEmpty) return;
@@ -866,7 +916,8 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     final targetAlbum = await _showAlbumPicker('Move to Vault');
     if (targetAlbum == null || !mounted) return;
 
-    showDialog(context: context, barrierDismissible: false, builder: (_) => const Center(child: CircularProgressIndicator()));
+    final progress = ValueNotifier<int>(0);
+    _showProgressDialog('Moving items...', chosen.length, progress);
 
     final vault = VaultService();
     final existing = await DatabaseHelper.instance.fetchAll();
@@ -874,11 +925,14 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     int successCount = 0;
     int skippedCount = 0;
 
-    for (final a in chosen) {
+    for (int i = 0; i < chosen.length; i++) {
+      final a = chosen[i];
+      progress.value = i + 1; // 👈 ప్రోగ్రెస్ నంబర్ అప్‌డేట్
+
       bool isDup = existing.any((e) => e.originalName == a.title && e.albumName == targetAlbum && e.isDeleted == 0);
       if (isDup) {
         skippedCount++;
-        idsToDelete.add(a.id); // వాల్ట్ లో ఆల్రెడీ ఉంటే మూవ్ స్కిప్ చేస్తాం, కానీ ఫోన్ లో నుండి లేపేస్తాం 
+        idsToDelete.add(a.id);
         continue;
       }
 
@@ -893,7 +947,7 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     }
 
     if (!mounted) return;
-    Navigator.pop(context);
+    Navigator.pop(context); // Close Progress Dialog
     
     final msg = skippedCount > 0 
         ? '$successCount moved to $targetAlbum, $skippedCount skipped (duplicate)'
@@ -907,15 +961,18 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     final chosen = _items.where((a) => _selected.contains(a.id)).toList();
     if (chosen.isEmpty) return;
 
-    // 👈 ఇక్కడ కూడా కన్ఫర్మేషన్ తీసేసాం (ఆండ్రాయిడ్ ఎలాగో అడుగుతుంది)
-    showDialog(context: context, barrierDismissible: false, builder: (_) => const Center(child: CircularProgressIndicator()));
+    final progress = ValueNotifier<int>(0);
+    _showProgressDialog('Deleting items...', chosen.length, progress);
 
     final vault = VaultService();
     final existing = await DatabaseHelper.instance.fetchAll();
     final idsToDelete = <String>[];
     int successCount = 0;
 
-    for (final a in chosen) {
+    for (int i = 0; i < chosen.length; i++) {
+      final a = chosen[i];
+      progress.value = i + 1; // 👈 ప్రోగ్రెస్ నంబర్ అప్‌డేట్
+
       bool isDup = existing.any((e) => e.originalName == a.title && e.albumName == 'My_Photos' && e.isDeleted == 1);
       if (isDup) {
          idsToDelete.add(a.id);
@@ -933,7 +990,7 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     }
 
     if (!mounted) return;
-    Navigator.pop(context);
+    Navigator.pop(context); // Close Progress Dialog
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$successCount items moved to Vault Bin 🗑️')));
     setState(_selected.clear);
     await _reload();
@@ -1091,29 +1148,46 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     final title = (_album == null || _album!.isAll) ? 'All photos' : _album!.name;
     return Positioned(
       top: 0, left: 0, right: 0,
-      child: _Glass(
-        p: p, radius: 0, blur: 28, border: Border(bottom: BorderSide(color: p.border)),
-        child: Padding(
-          padding: EdgeInsets.only(top: inset),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              SizedBox(
-                height: 56,
-                child: AnimatedSwitcher(duration: const Duration(milliseconds: 220), child: selecting ? _selectBar(p) : _normalBar(p)),
-              ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
-                child: IgnorePointer(
-                  ignoring: selecting,
-                  child: AnimatedOpacity(
-                    duration: const Duration(milliseconds: 200),
-                    opacity: selecting ? 0.45 : 1,
-                    child: _TabPill(p: p, ctrl: _tabs, labels: [title, 'Albums']),
+      child: ClipRRect(
+        // 👈 Curve alane uncham
+        borderRadius: const BorderRadius.vertical(bottom: Radius.circular(32)),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 30, sigmaY: 30),
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: p.bar, // 👈 Gradient theesesi plain theme color (White) pettam
+              borderRadius: const BorderRadius.vertical(bottom: Radius.circular(32)),
+              border: Border.all(color: p.border, width: 1),
+              boxShadow: [
+                BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 15, offset: const Offset(0, 5))
+              ],
+            ),
+            child: Padding(
+              padding: EdgeInsets.only(top: inset),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SizedBox(
+                    height: 56,
+                    child: AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 220), 
+                      child: selecting ? _selectBar(p) : _normalBar(p)
+                    ),
                   ),
-                ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(14, 0, 14, 14), 
+                    child: IgnorePointer(
+                      ignoring: selecting,
+                      child: AnimatedOpacity(
+                        duration: const Duration(milliseconds: 200),
+                        opacity: selecting ? 0.45 : 1,
+                        child: _TabPill(p: p, ctrl: _tabs, labels: [title, 'Albums']),
+                      ),
+                    ),
+                  ),
+                ],
               ),
-            ],
+            ),
           ),
         ),
       ),
@@ -1265,6 +1339,32 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
                       onChanged: (v) {
                         _toggleTheme();
                         setModalState(() {}); 
+                      },
+                    ),
+                  ),
+
+                  // 👈 ఇక్కడ కొత్తగా "సార్టింగ్" (Sorting) ఆప్షన్ పెట్టాను 
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(Icons.sort_rounded, color: p.accent, size: 28),
+                    title: Text('Sort By', style: TextStyle(color: p.text, fontSize: 16, fontWeight: FontWeight.w600)),
+                    trailing: DropdownButton<int>(
+                      dropdownColor: p.surface,
+                      value: _sortType,
+                      underline: const SizedBox(),
+                      style: TextStyle(color: p.accent, fontWeight: FontWeight.w800, fontSize: 16),
+                      items: const [
+                        DropdownMenuItem(value: 0, child: Text('Created Date')),
+                        DropdownMenuItem(value: 1, child: Text('Modified Date')),
+                      ],
+                      onChanged: (v) async {
+                        if (v != null && v != _sortType) {
+                          setState(() { _sortType = v; _layout = null; _ready = false; });
+                          final sp = await SharedPreferences.getInstance();
+                          await sp.setInt(_kSortKey, v);
+                          Navigator.pop(ctx);
+                          _reload(); // సార్ట్ మార్చగానే ఆటోమేటిక్ గా ఫొటోస్ అప్‌డేట్ అవుతాయి
+                        }
                       },
                     ),
                   ),

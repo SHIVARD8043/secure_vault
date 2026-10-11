@@ -19,11 +19,13 @@ import 'video_player_screen.dart';
 // ════════════════════════════════════════════════════════════════════
 class _Glass extends StatelessWidget {
   const _Glass({
-    super.key, required this.p, required this.child, this.radius = 24, this.blur = 22, this.border,
+    super.key, this.p, required this.child, this.radius = 24, this.blur = 25, this.color, this.border,
   });
-  final AppPalette p;
+  
+  final AppPalette? p; 
   final Widget child;
   final double radius, blur;
+  final Color? color;
   final BoxBorder? border;
 
   @override
@@ -34,7 +36,11 @@ class _Glass extends StatelessWidget {
       child: BackdropFilter(
         filter: ImageFilter.blur(sigmaX: blur, sigmaY: blur),
         child: DecoratedBox(
-          decoration: BoxDecoration(color: p.bar, borderRadius: br, border: border ?? (radius > 0 ? Border.all(color: p.border) : null)),
+          decoration: BoxDecoration(
+            color: color ?? (p != null ? p!.bar : Colors.black.withOpacity(0.45)), 
+            borderRadius: br, 
+            border: border ?? (radius > 0 && p != null ? Border.all(color: p!.border) : null)
+          ),
           child: child,
         ),
       ),
@@ -125,7 +131,7 @@ Future<bool> _copyItem(dynamic db, VaultItem it, String album) async {
     final row = Map<String, Object?>.from(rows.first as Map)
       ..remove('id')
       ..['albumName'] = album
-      ..['isDeleted'] = 0 // కాపీ చేసిన ఫైల్ బిన్ లో ఉండకూడదు కదా!
+      ..['isDeleted'] = 0 
       ..['encryptedPath'] = newPath;
     await db.insert('vault_items', row);
     return true;
@@ -165,7 +171,7 @@ Future<Map<String, String>> _loadMeta(VaultItem item) async {
     try {
       final buf = await ui.ImmutableBuffer.fromUint8List(await f.readAsBytes());
       final d = await ui.ImageDescriptor.encoded(buf);
-      out['Resolution'] = '${d.width} × ${d.height}  (${(d.width * d.height / 1e6).toStringAsFixed(1)} MP)';
+      out['Resolution'] = '${d.width} × ${d.height}  (${((d.width * d.height) / 1e6).toStringAsFixed(1)} MP)';
       d.dispose(); buf.dispose();
     } catch (_) {}
   } else {
@@ -221,6 +227,9 @@ class _BinScreenState extends State<BinScreen> {
   List<VaultItem> _items = [];
   final Set<int> _selected = {};
   bool _loading = true;
+  
+  int _sortType = 0; // 0: Created Date, 1: Modified Date, 2: Size
+  String? _filterType; // null = all, 'video' = only videos, 'image' = only photos
 
   @override
   void initState() {
@@ -230,9 +239,37 @@ class _BinScreenState extends State<BinScreen> {
 
   Future<void> _loadBinItems() async {
     final allItems = await DatabaseHelper.instance.fetchAll();
+    var binItems = allItems.where((i) => i.isDeleted == 1).toList();
+
+    // 👈 6. Filtering Logic
+    if (_filterType != null) {
+      binItems = binItems.where((i) => i.type == _filterType).toList();
+    }
+
+    // 👈 5. Sorting Logic
+    binItems.sort((a, b) {
+      if (_sortType == 0) {
+        final dA = DateTime.tryParse(a.addedDate ?? '') ?? DateTime.fromMillisecondsSinceEpoch(0);
+        final dB = DateTime.tryParse(b.addedDate ?? '') ?? DateTime.fromMillisecondsSinceEpoch(0);
+        return dB.compareTo(dA);
+      } else if (_sortType == 1) {
+        final fA = File(a.encryptedPath);
+        final fB = File(b.encryptedPath);
+        final dA = fA.existsSync() ? fA.statSync().modified : DateTime.fromMillisecondsSinceEpoch(0);
+        final dB = fB.existsSync() ? fB.statSync().modified : DateTime.fromMillisecondsSinceEpoch(0);
+        return dB.compareTo(dA);
+      } else {
+        final fA = File(a.encryptedPath);
+        final fB = File(b.encryptedPath);
+        final sA = fA.existsSync() ? fA.statSync().size : 0;
+        final sB = fB.existsSync() ? fB.statSync().size : 0;
+        return sB.compareTo(sA);
+      }
+    });
+
     if (mounted) {
       setState(() {
-        _items = allItems.where((i) => i.isDeleted == 1).toList();
+        _items = binItems;
         _loading = false;
       });
     }
@@ -240,24 +277,71 @@ class _BinScreenState extends State<BinScreen> {
 
   void _toggle(VaultItem a) => setState(() { _selected.contains(a.id) ? _selected.remove(a.id) : _selected.add(a.id!); });
 
+  // 👈 3. Custom Progress Dialog for 1/100
+  void _showProgressDialog(String title, int total, ValueNotifier<int> progress) {
+    final p = context.read<ThemeProvider>().p;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => PopScope(
+        canPop: false,
+        child: Dialog(
+          backgroundColor: p.surface,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 24),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(color: p.accent),
+                const SizedBox(width: 24),
+                ValueListenableBuilder<int>(
+                  valueListenable: progress,
+                  builder: (_, val, __) => Text(
+                    '$title\n$val / $total',
+                    style: TextStyle(color: p.text, fontSize: 16, fontWeight: FontWeight.w600, height: 1.4),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Future<void> _restoreSelected() async {
-    await _withProgress(context, () => DatabaseHelper.instance.setDeleted(_selected.toList(), false));
+    final chosen = _items.where((i) => _selected.contains(i.id)).toList();
+    if (chosen.isEmpty) return;
+
+    final progress = ValueNotifier<int>(0);
+    _showProgressDialog('Restoring...', chosen.length, progress);
+
+    for (int i = 0; i < chosen.length; i++) {
+      progress.value = i + 1;
+      await DatabaseHelper.instance.setDeleted([chosen[i].id!], false);
+    }
+
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${_selected.length} items restored! ♻️')));
+      Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${chosen.length} items restored! ♻️')));
       setState(() => _selected.clear());
       _loadBinItems();
     }
   }
 
   Future<void> _deleteForeverSelected() async {
+    final chosen = _items.where((i) => _selected.contains(i.id)).toList();
+    if (chosen.isEmpty) return;
+
     final bool? confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) {
-        final p = context.watch<ThemeProvider>().p;
+        final p = context.read<ThemeProvider>().p;
         return AlertDialog(
           backgroundColor: p.surface, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
-          title: Text('శాశ్వతంగా తొలగించాలా?', style: TextStyle(color: p.text, fontWeight: FontWeight.bold)),
-          content: Text('ఈ ${_selected.length} ఐటెమ్స్ మళ్లీ తిరిగి రావు. ఖచ్చితంగా డిలీట్ చేయాలా?', style: TextStyle(color: p.sub)),
+          title: Text('Delete Permanently?', style: TextStyle(color: p.text, fontWeight: FontWeight.bold)), // 👈 2. English Text
+          content: Text('These ${chosen.length} items will be lost forever. Are you sure?', style: TextStyle(color: p.sub)),
           actions: [
             TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text('Cancel', style: TextStyle(color: p.text))),
             TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Delete', style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold))),
@@ -267,8 +351,17 @@ class _BinScreenState extends State<BinScreen> {
     );
 
     if (confirm != true || !mounted) return;
-    await _withProgress(context, () => VaultService().deleteForever(_items.where((i) => _selected.contains(i.id)).toList()));
+
+    final progress = ValueNotifier<int>(0);
+    _showProgressDialog('Deleting...', chosen.length, progress);
+
+    for (int i = 0; i < chosen.length; i++) {
+      progress.value = i + 1;
+      await VaultService().deleteForever([chosen[i]]);
+    }
+
     if (mounted) {
+      Navigator.pop(context);
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Items permanently deleted 🗑️')));
       setState(() => _selected.clear());
       _loadBinItems();
@@ -281,19 +374,24 @@ class _BinScreenState extends State<BinScreen> {
     await _deleteForeverSelected();
   }
 
-  // ── NEW: Move & Copy for Bin ──
   Future<void> _copySelected(AppPalette p) async {
     final target = await _pickAlbum(context, 'Copy to', p);
     if (target == null || !mounted) return;
     final chosen = _items.where((i) => _selected.contains(i.id)).toList();
-    final ok = await _withProgress(context, () async {
-      final db = await DatabaseHelper.instance.database;
-      var n = 0;
-      for (final it in chosen) { if (await _copyItem(db, it, target)) n++; }
-      return n;
-    });
+
+    final progress = ValueNotifier<int>(0);
+    _showProgressDialog('Copying...', chosen.length, progress);
+
+    final db = await DatabaseHelper.instance.database;
+    int successCount = 0;
+    for (int i = 0; i < chosen.length; i++) {
+      progress.value = i + 1;
+      if (await _copyItem(db, chosen[i], target)) successCount++;
+    }
+
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$ok/${chosen.length} copied to $target 📄')));
+      Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$successCount/${chosen.length} copied to $target 📄')));
       setState(() => _selected.clear());
       _loadBinItems();
     }
@@ -303,21 +401,93 @@ class _BinScreenState extends State<BinScreen> {
     final target = await _pickAlbum(context, 'Restore to Album', p);
     if (target == null || !mounted) return;
     final chosen = _items.where((i) => _selected.contains(i.id)).toList();
-    final ok = await _withProgress(context, () async {
-      final db = await DatabaseHelper.instance.database;
-      var n = 0;
-      for (final it in chosen) {
-        // Move కొడితే ఆల్బమ్ పేరు మారిపోయి, isDeleted కూడా 0 అయిపోయి రీస్టోర్ అయిపోతుంది
-        await db.update('vault_items', {'albumName': target, 'isDeleted': 0}, where: 'id = ?', whereArgs: [it.id]);
-        n++;
-      }
-      return n;
-    });
+    
+    final progress = ValueNotifier<int>(0);
+    _showProgressDialog('Moving...', chosen.length, progress);
+
+    final db = await DatabaseHelper.instance.database;
+    int successCount = 0;
+    for (int i = 0; i < chosen.length; i++) {
+      progress.value = i + 1;
+      await db.update('vault_items', {'albumName': target, 'isDeleted': 0}, where: 'id = ?', whereArgs: [chosen[i].id]);
+      successCount++;
+    }
+
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$ok/${chosen.length} restored to $target 🚀')));
+      Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$successCount/${chosen.length} restored to $target 🚀')));
       setState(() => _selected.clear());
       _loadBinItems();
     }
+  }
+
+  // 👈 6. Tappable Details for Filtering in Bin
+  Future<String?> _showBinStats(BuildContext context, AppPalette p) {
+    return showModalBottomSheet<String>(
+      context: context, backgroundColor: p.surface, isScrollControlled: true,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
+      builder: (_) => FutureBuilder<Map<String, String>>(
+        future: () async {
+          final allItems = await DatabaseHelper.instance.fetchAll();
+          final baseItems = allItems.where((i) => i.isDeleted == 1).toList();
+          
+          int pCount = 0, vCount = 0, pSize = 0, vSize = 0;
+          for (final item in baseItems) {
+            final f = File(item.encryptedPath);
+            int size = 0;
+            if (await f.exists()) size = (await f.stat()).size;
+            
+            if (item.type == 'video') {
+              vCount++;
+              vSize += size;
+            } else {
+              pCount++;
+              pSize += size;
+            }
+          }
+          return {
+            'Photos': '$pCount items  •  ${_fmtSize(pSize)}',
+            'Videos': '$vCount items  •  ${_fmtSize(vSize)}',
+            'Total Size': _fmtSize(pSize + vSize),
+          };
+        }(),
+        builder: (ctx, snap) {
+          final m = snap.data;
+          return SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(24, 24, 24, 32),
+              child: m == null
+                  ? SizedBox(height: 160, child: Center(child: CircularProgressIndicator(color: p.accent)))
+                  : Column(mainAxisSize: MainAxisSize.min, children: [
+                      Text('Recycle Bin Info', style: TextStyle(color: p.text, fontSize: 20, fontWeight: FontWeight.w800)),
+                      const SizedBox(height: 20),
+                      for (final e in m.entries)
+                        GestureDetector(
+                          onTap: () {
+                            if (e.key == 'Videos') Navigator.pop(ctx, 'video');
+                            else if (e.key == 'Photos') Navigator.pop(ctx, 'image');
+                            else Navigator.pop(ctx, 'all');
+                          },
+                          behavior: HitTestBehavior.opaque,
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 10),
+                            child: Row(children: [
+                              Icon(
+                                e.key == 'Photos' ? Icons.image_outlined : e.key == 'Videos' ? Icons.play_circle_outline : Icons.storage_rounded, 
+                                color: p.accent, size: 24
+                              ),
+                              const SizedBox(width: 12),
+                              SizedBox(width: 100, child: Text(e.key, style: TextStyle(color: p.sub, fontSize: 15, fontWeight: FontWeight.w600))),
+                              Expanded(child: Text(e.value, style: TextStyle(color: p.text, fontSize: 16, fontWeight: FontWeight.w700), textAlign: TextAlign.right)),
+                            ]),
+                          ),
+                        ),
+                    ]),
+            ),
+          );
+        },
+      ),
+    );
   }
 
   @override
@@ -342,14 +512,14 @@ class _BinScreenState extends State<BinScreen> {
                             children: [
                               Icon(Icons.delete_outline_rounded, size: 64, color: p.sub.withValues(alpha: 0.5)),
                               const SizedBox(height: 16),
-                              Text('ట్రాష్ ఖాళీగా ఉంది', style: TextStyle(color: p.sub, fontSize: 16)),
+                              Text('Bin is empty', style: TextStyle(color: p.sub, fontSize: 16)), // 👈 English Text
                             ],
                           ),
                         )
                       : GridView.builder(
                           physics: const BouncingScrollPhysics(),
-                          padding: EdgeInsets.only(top: mq.padding.top + 70, left: 2, right: 2, bottom: 120),
-                          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 3, crossAxisSpacing: 2, mainAxisSpacing: 2),
+                          padding: EdgeInsets.only(top: mq.padding.top + 70, left: 4, right: 4, bottom: 120),
+                          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 3, crossAxisSpacing: 3, mainAxisSpacing: 3),
                           itemCount: _items.length,
                           itemBuilder: (context, index) {
                             final item = _items[index];
@@ -358,7 +528,53 @@ class _BinScreenState extends State<BinScreen> {
                             final imgPath = (isVideo && item.thumbnailPath != null) ? item.thumbnailPath! : item.encryptedPath;
                             final file = File(imgPath);
 
+                            // 👈 1. Glassy Cropped Edge Tile Design
+                            final framed = DecoratedBox(
+                              decoration: BoxDecoration(color: p.glass, borderRadius: BorderRadius.circular(11), border: Border.all(color: p.border)),
+                              child: Padding(
+                                padding: const EdgeInsets.all(1.5),
+                                child: ClipRRect(
+                                  borderRadius: BorderRadius.circular(9.5),
+                                  child: Stack(fit: StackFit.expand, children: [
+                                    Hero(
+                                      tag: 'bin_${item.id}',
+                                      child: file.existsSync() 
+                                          ? Image.file(file, fit: BoxFit.cover, gaplessPlayback: true) 
+                                          : Container(color: p.bg2, child: Icon(Icons.broken_image, color: p.sub)),
+                                    ),
+                                    
+                                    if (isVideo)
+                                      Positioned(
+                                        right: 6, bottom: 6,
+                                        child: Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                                          decoration: BoxDecoration(color: Colors.black.withOpacity(0.75), borderRadius: BorderRadius.circular(6)),
+                                          child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                                            Icon(Icons.play_arrow_rounded, color: Colors.white, size: 14),
+                                            SizedBox(width: 4),
+                                            Text('VIDEO', style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold, letterSpacing: 0.5)),
+                                          ]),
+                                        ),
+                                      ),
+                                      
+                                    AnimatedContainer(duration: const Duration(milliseconds: 180), color: sel ? p.accent.withOpacity(0.22) : Colors.transparent),
+                                    if (sel)
+                                      Positioned(
+                                        top: 7, left: 7,
+                                        child: AnimatedContainer(
+                                          duration: const Duration(milliseconds: 180),
+                                          width: 24, height: 24,
+                                          decoration: BoxDecoration(shape: BoxShape.circle, color: p.accent),
+                                          child: const Icon(Icons.check_rounded, size: 16, color: Colors.white),
+                                        ),
+                                      ),
+                                  ]),
+                                ),
+                              ),
+                            );
+
                             return GestureDetector(
+                              behavior: HitTestBehavior.opaque,
                               onTap: () async {
                                 if (selecting) {
                                   _toggle(item);
@@ -376,16 +592,9 @@ class _BinScreenState extends State<BinScreen> {
                                 }
                               },
                               onLongPress: () { HapticFeedback.mediumImpact(); _toggle(item); },
-                              child: Stack(
-                                fit: StackFit.expand, 
-                                children: [
-                                  Hero(
-                                    tag: 'bin_${item.id}',
-                                    child: file.existsSync() ? Image.file(file, fit: BoxFit.cover) : Container(color: p.bg2, child: Icon(Icons.broken_image, color: p.sub)),
-                                  ),
-                                  if (isVideo) const Center(child: Icon(Icons.play_circle_fill_rounded, color: Colors.white, size: 28, shadows: [Shadow(color: Colors.black54, blurRadius: 4)])),
-                                  if (sel) Container(color: p.accent.withValues(alpha: 0.4), alignment: Alignment.bottomRight, padding: const EdgeInsets.all(4), child: const Icon(Icons.check_circle, color: Colors.white)),
-                                ],
+                              child: AnimatedScale(
+                                scale: sel ? 0.86 : 1, duration: const Duration(milliseconds: 200), curve: Curves.easeOutCubic,
+                                child: framed,
                               ),
                             );
                           },
@@ -415,6 +624,39 @@ class _BinScreenState extends State<BinScreen> {
                               const SizedBox(width: 8),
                               IconButton(icon: Icon(Icons.arrow_back_ios_new_rounded, color: p.text, size: 20), onPressed: () => Navigator.pop(context)),
                               Expanded(child: Text('Recycle Bin', style: TextStyle(color: p.text, fontSize: 20, fontWeight: FontWeight.bold))),
+                              
+                              // 👈 5. Sorting Options 
+                              PopupMenuButton<int>(
+                                icon: Icon(Icons.sort_rounded, color: p.text),
+                                color: p.surface,
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                                initialValue: _sortType,
+                                onSelected: (val) {
+                                  if (val != _sortType) {
+                                    setState(() => _sortType = val);
+                                    _loadBinItems();
+                                  }
+                                },
+                                itemBuilder: (_) => [
+                                  PopupMenuItem(value: 0, child: Text('Created Date', style: TextStyle(color: p.text))),
+                                  PopupMenuItem(value: 1, child: Text('Modified Date', style: TextStyle(color: p.text))),
+                                  PopupMenuItem(value: 2, child: Text('Size', style: TextStyle(color: p.text))),
+                                ],
+                              ),
+
+                              // Filter Info Button
+                              IconButton(
+                                tooltip: 'Bin Info',
+                                icon: Icon(_filterType != null ? Icons.filter_alt_rounded : Icons.info_outline_rounded, color: _filterType != null ? p.accent : p.text), 
+                                onPressed: () async {
+                                  final res = await _showBinStats(context, p);
+                                  if (res != null) {
+                                    setState(() => _filterType = res == 'all' ? null : res);
+                                    _loadBinItems();
+                                  }
+                                }
+                              ),
+
                               if (_items.isNotEmpty)
                                 TextButton(onPressed: _emptyBin, child: const Text('Empty', style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold))),
                               const SizedBox(width: 8),
@@ -520,31 +762,49 @@ class _BinPreviewScreenState extends State<BinPreviewScreen> {
     final p = context.watch<ThemeProvider>().p;
 
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: p.bg, // 👈 4. Theme Based Background
       extendBodyBehindAppBar: true,
+      extendBody: true, // required for bottom bar blur to work nicely over image
       body: Stack(
         fit: StackFit.expand,
         children: [
           GestureDetector(
             onTap: () => setState(() => _chrome = !_chrome),
-            child: PhotoViewGallery.builder(
-              pageController: _pc,
-              itemCount: widget.items.length,
-              onPageChanged: (i) => setState(() => _index = i),
-              backgroundDecoration: const BoxDecoration(color: Colors.black),
-              builder: (_, i) {
-                final item = widget.items[i];
-                return PhotoViewGalleryPageOptions(
-                  imageProvider: ResizeImage.resizeIfNeeded(2400, null, FileImage(File(item.encryptedPath))),
-                  heroAttributes: PhotoViewHeroAttributes(tag: 'bin_${item.id}'),
-                  minScale: PhotoViewComputedScale.contained,
-                  maxScale: PhotoViewComputedScale.covered * 3,
-                );
-              },
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                PhotoViewGallery.builder(
+                  pageController: _pc,
+                  itemCount: widget.items.length,
+                  onPageChanged: (i) => setState(() => _index = i),
+                  backgroundDecoration: BoxDecoration(color: p.bg), 
+                  builder: (_, i) {
+                    final item = widget.items[i];
+                    final isVideo = item.type == 'video';
+                    final imgPath = (isVideo && item.thumbnailPath != null) ? item.thumbnailPath! : item.encryptedPath;
+                    
+                    // 👈 4. Double Tap To Zoom Fix with FileImage
+                    return PhotoViewGalleryPageOptions(
+                      imageProvider: FileImage(File(imgPath)),
+                      heroAttributes: PhotoViewHeroAttributes(tag: 'bin_${item.id}'),
+                      minScale: PhotoViewComputedScale.contained,
+                      maxScale: PhotoViewComputedScale.covered * 3,
+                    );
+                  },
+                ),
+
+                if (_cur.type == 'video')
+                  Center(
+                    child: GestureDetector(
+                      onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => VideoPlayerScreen(file: File(_cur.encryptedPath), title: _cur.originalName))),
+                      child: const Icon(Icons.play_circle_fill_rounded, color: Colors.white, size: 80, shadows: [Shadow(color: Colors.black54, blurRadius: 10)]),
+                    ),
+                  ),
+              ],
             ),
           ),
 
-          // Top Bar
+          // Top Theme Glass Bar
           Positioned(
             top: 0, left: 0, right: 0,
             child: AnimatedOpacity(
@@ -552,17 +812,18 @@ class _BinPreviewScreenState extends State<BinPreviewScreen> {
               child: IgnorePointer(
                 ignoring: !_chrome,
                 child: _Glass(
-                  p: p, radius: 0, blur: 20, border: Border(bottom: BorderSide(color: p.border)),
+                  p: p, radius: 0, blur: 25, color: p.bar, 
+                  border: Border(bottom: BorderSide(color: p.border)),
                   child: Padding(
                     padding: EdgeInsets.only(top: mq.padding.top),
                     child: SizedBox(
                       height: 56,
                       child: Row(
                         children: [
-                          IconButton(icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white, size: 20), onPressed: () => Navigator.pop(context)),
-                          Expanded(child: Text('${_index + 1} / ${widget.items.length}', style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold))),
-                          IconButton(tooltip: 'Details', icon: const Icon(Icons.info_outline_rounded, color: Colors.white), onPressed: () => _showMeta(context, p, _cur)),
-                          IconButton(tooltip: 'More', icon: const Icon(Icons.more_vert_rounded, color: Colors.white), onPressed: () => _showPreviewActions(p)),
+                          IconButton(icon: Icon(Icons.arrow_back_ios_new_rounded, color: p.text, size: 20), onPressed: () => Navigator.pop(context)),
+                          Expanded(child: Text('${_index + 1} / ${widget.items.length}', style: TextStyle(color: p.text, fontSize: 18, fontWeight: FontWeight.bold))),
+                          IconButton(tooltip: 'Details', icon: Icon(Icons.info_outline_rounded, color: p.text), onPressed: () => _showMeta(context, p, _cur)),
+                          IconButton(tooltip: 'More', icon: Icon(Icons.more_vert_rounded, color: p.text), onPressed: () => _showPreviewActions(p)),
                           const SizedBox(width: 4),
                         ],
                       ),
@@ -573,7 +834,7 @@ class _BinPreviewScreenState extends State<BinPreviewScreen> {
             ),
           ),
 
-          // Bottom Bar (Restore / Delete Forever)
+          // Bottom Theme Glass Bar
           Positioned(
             bottom: 0, left: 0, right: 0,
             child: AnimatedOpacity(
@@ -581,11 +842,12 @@ class _BinPreviewScreenState extends State<BinPreviewScreen> {
               child: IgnorePointer(
                 ignoring: !_chrome,
                 child: _Glass(
-                  p: p, radius: 0, blur: 20, border: Border(top: BorderSide(color: p.border)),
+                  p: p, radius: 0, blur: 25, color: p.bar,
+                  border: Border(top: BorderSide(color: p.border)),
                   child: Padding(
-                    padding: EdgeInsets.only(bottom: mq.padding.bottom),
+                    padding: EdgeInsets.only(bottom: mq.padding.bottom, top: 12),
                     child: SizedBox(
-                      height: 80,
+                      height: 70,
                       child: Row(
                         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                         children: [
