@@ -169,13 +169,17 @@ String _fmtSize(int b) {
 Future<Map<String, String>> _loadMeta(VaultItem item) async {
   final f = File(item.encryptedPath);
   final out = <String, String>{};
+  
   out['Name'] = item.originalName ?? item.encryptedPath.split(RegExp(r'[\\/]')).last;
+  
+  // 👈 1. అసలైన డేట్ డేటాబేస్ నుండే తీసుకుంటున్నాం
   final added = _dateOf(item);
-  out['Added'] = added == null ? '-' : DateFormat('EEE, d MMM yyyy • h:mm a').format(added);
+  out['Date Taken'] = added == null ? '-' : DateFormat('EEE, d MMM yyyy • h:mm a').format(added);
+  
   out['Album'] = item.albumName;
   if (await f.exists()) {
     final st = await f.stat();
-    out['Modified'] = DateFormat('d MMM yyyy • h:mm a').format(st.modified);
+    // 👈 'Modified' డేట్ ని తీసేసాం, ఎందుకంటే అది కాపీ అయిన డేట్ చూపిస్తుంది.
     out['Size'] = _fmtSize(st.size);
     final ext = out['Name']!.contains('.') ? out['Name']!.split('.').last.toUpperCase() : '-';
     out['Type'] = ext;
@@ -265,16 +269,11 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
       albumItems = albumItems.where((i) => i.type == _filterType).toList();
     }
 
+    // 👈 2. సార్టింగ్ మొత్తం డేటాబేస్ లో సేవ్ అయిన ఒరిజినల్ డేట్ బట్టే జరగాలి
     albumItems.sort((a, b) {
-      if (_sortType == 0) {
-        final dA = DateTime.tryParse(a.addedDate ?? '') ?? DateTime.fromMillisecondsSinceEpoch(0);
-        final dB = DateTime.tryParse(b.addedDate ?? '') ?? DateTime.fromMillisecondsSinceEpoch(0);
-        return dB.compareTo(dA);
-      } else if (_sortType == 1) {
-        final fA = File(a.encryptedPath);
-        final fB = File(b.encryptedPath);
-        final dA = fA.existsSync() ? fA.statSync().modified : DateTime.fromMillisecondsSinceEpoch(0);
-        final dB = fB.existsSync() ? fB.statSync().modified : DateTime.fromMillisecondsSinceEpoch(0);
+      if (_sortType == 0 || _sortType == 1) { 
+        final dA = DateTime.tryParse(a.addedDate) ?? DateTime.fromMillisecondsSinceEpoch(0);
+        final dB = DateTime.tryParse(b.addedDate) ?? DateTime.fromMillisecondsSinceEpoch(0);
         return dB.compareTo(dA);
       } else {
         final fA = File(a.encryptedPath);
@@ -297,15 +296,8 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
   void _groupItems() {
     _groupedItems = groupBy(_items, (VaultItem item) {
       DateTime date = DateTime.now();
-      try { if (item.addedDate != null) date = DateTime.tryParse(item.addedDate.toString()) ?? DateTime.now(); } catch (_) {}
-      
-      if (_sortType == 1) {
-        final f = File(item.encryptedPath);
-        if (f.existsSync()) date = f.statSync().modified;
-      }
-
-      final now = DateTime.now(), today = DateTime(now.year, now.month, now.day), yesterday = today.subtract(const Duration(days: 1));
-      final itemDate = DateTime(date.year, date.month, date.day);
+      // 👈 3. గ్రూపింగ్ కూడా ఒరిజినల్ డేట్ బట్టే జరగాలి!
+      try { date = DateTime.tryParse(item.addedDate) ?? DateTime.now(); } catch (_) {}
       
       if (_sortType == 2) {
         final f = File(item.encryptedPath);
@@ -315,6 +307,9 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
         return "Under 10MB";
       }
 
+      final now = DateTime.now(), today = DateTime(now.year, now.month, now.day), yesterday = today.subtract(const Duration(days: 1));
+      final itemDate = DateTime(date.year, date.month, date.day);
+      
       if (itemDate == today) return "Today";
       if (itemDate == yesterday) return "Yesterday";
       if (date.year == now.year) return DateFormat('MMMM d').format(date);
@@ -626,8 +621,9 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
                                         final sel = _selected.contains(item.id);
                                         final isVideo = item.type == 'video';
                                         final isAudio = item.type == 'audio'; 
-                                        
-                                        final imgPath = (isVideo && item.thumbnailPath != null) ? item.thumbnailPath! : item.encryptedPath;
+
+                                        // 👈 1. ఇక్కడ మ్యాజిక్: ఇమేజ్ అయినా, వీడియో అయినా ఫస్ట్ థంబ్‌నెయిల్ నే తీసుకోవాలి!
+                                        final imgPath = (item.thumbnailPath != null) ? item.thumbnailPath! : item.encryptedPath;
                                         final file = File(imgPath);
 
                                         // 👈 5. Updated Tile Rendering for Audio
@@ -663,7 +659,8 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
                                                   : Hero(
                                                       tag: 'vault_${item.id}',
                                                       child: file.existsSync()
-                                                          ? Image.file(file, fit: BoxFit.cover, gaplessPlayback: true)
+                                                          // 👈 2. ఇక్కడ cacheWidth: 300 యాడ్ చేశాం. దీనివల్ల RAM అస్సలు ఫుల్ అవ్వదు!
+                                                          ? Image.file(file, fit: BoxFit.cover, gaplessPlayback: true, cacheWidth: 300)
                                                           : Container(color: p.bg2, child: Icon(Icons.broken_image, color: p.sub)),
                                                     ),
                                                 

@@ -525,7 +525,7 @@ class _BinScreenState extends State<BinScreen> {
                             final item = _items[index];
                             final sel = _selected.contains(item.id);
                             final isVideo = item.type == 'video';
-                            final imgPath = (isVideo && item.thumbnailPath != null) ? item.thumbnailPath! : item.encryptedPath;
+                            final imgPath = (item.thumbnailPath != null) ? item.thumbnailPath! : item.encryptedPath;
                             final file = File(imgPath);
 
                             // 👈 1. Glassy Cropped Edge Tile Design
@@ -539,7 +539,7 @@ class _BinScreenState extends State<BinScreen> {
                                     Hero(
                                       tag: 'bin_${item.id}',
                                       child: file.existsSync() 
-                                          ? Image.file(file, fit: BoxFit.cover, gaplessPlayback: true) 
+                                          ? Image.file(file, fit: BoxFit.cover, gaplessPlayback: true,cacheWidth: 300) 
                                           : Container(color: p.bg2, child: Icon(Icons.broken_image, color: p.sub)),
                                     ),
                                     

@@ -17,21 +17,23 @@ class VaultService {
     return d;
   }
 
-  // ఇక్కడ కొత్తగా {bool trash = false} అని యాడ్ చేశాం 
   Future<bool> hideAsset(AssetEntity asset, String album, {bool trash = false}) async {
     try {
       final src = await asset.originFile;
       if (src == null) return false;
 
-      // 1. కాపీ చేయడానికి ముందే పాత ఫైల్ ఒరిజినల్ టైమ్స్ సేవ్ చేసుకుంటున్నాం
-      final stat = await src.stat();
-      final originalModified = stat.modified;
-      final originalAccessed = stat.accessed;
+      // 👈 1. Cache ఫైల్ నుండి కాకుండా, Original Asset నుండే రియల్ డీటెయిల్స్ లాగుతున్నాం! 🔥
+      final realTitle = asset.title ?? p.basename(src.path);
+      final realModified = asset.modifiedDateTime; 
+      final realCreated = asset.createDateTime;    
 
       final media = await _dir('media');
       final thumbs = await _dir('thumbs');
       final id = '${DateTime.now().microsecondsSinceEpoch}_${_rand.nextInt(9999)}';
-      final dest = p.join(media.path, '$id${p.extension(src.path)}');
+      
+      // ఒరిజినల్ ఫైల్ ఎక్స్‌టెన్షన్ (.jpg/.png) ని తీసుకుంటున్నాం
+      final ext = realTitle.contains('.') ? '.${realTitle.split('.').last}' : p.extension(src.path);
+      final dest = p.join(media.path, '$id$ext');
       final destFile = File(dest);
 
       await src.copy(dest); 
@@ -40,9 +42,13 @@ class VaultService {
         return false;
       }
 
-      // 2. అసలైన మ్యాజిక్: వాల్ట్ లోకి వచ్చిన కొత్త ఫైల్ కి పాత డేట్ ని సెట్ చేస్తున్నాం!
-      await destFile.setLastModified(originalModified);
-      await destFile.setLastAccessed(originalAccessed);
+      // 👈 2. వాల్ట్ లోకి వచ్చిన ఫైల్ కి కచ్చితంగా పాత Original Dates సెట్ చేస్తున్నాం!
+      try {
+        await destFile.setLastModified(realModified);
+        await destFile.setLastAccessed(realCreated);
+      } catch (_) {
+        // OS permissions ఇవ్వకపోతే స్కిప్ అవుతుంది, కానీ DB లో పక్కాగా సేవ్ అవుతుంది
+      }
 
       String? thumbPath;
       final bytes = await asset.thumbnailDataWithSize(const ThumbnailSize(400, 400), quality: 80);
@@ -51,13 +57,14 @@ class VaultService {
         await File(thumbPath).writeAsBytes(bytes);
       }
 
+      // 👈 3. Database లో పిచ్చి పేర్లు కాకుండా, 'realTitle' మరియు 'realCreated' సేవ్ చేస్తున్నాం!
       final item = VaultItem(
-        originalName: p.basename(src.path),
+        originalName: realTitle, // పక్కాగా IMG_20261011_12345.jpg లాంటి ఒరిజినల్ నేమ్ సేవ్ అవుతుంది
         encryptedPath: dest,
         thumbnailPath: thumbPath,
         type: asset.type == AssetType.video ? 'video' : 'image',
         albumName: album,
-        addedDate: asset.createDateTime.toIso8601String(),
+        addedDate: realCreated.toIso8601String(), // ఒరిజినల్ గా ఫోటో తీసిన ఎక్సాక్ట్ డేట్ సేవ్ అవుతుంది
         isDeleted: trash ? 1 : 0, 
       );
       await DatabaseHelper.instance.insertItem(item.toMap());
@@ -79,17 +86,15 @@ class VaultService {
     await DatabaseHelper.instance.removeRows(items.map((e) => e.id!).toList());
   }
 
-  /// Puts the photo/video/audio back in the phone gallery or public folder, then removes it from the vault.
   Future<void> exportToGallery(List<VaultItem> items, {bool removeFromVault = true}) async {
     for (final i in items) {
       if (i.type == 'video') {
         await PhotoManager.editor.saveVideo(File(i.encryptedPath), title: i.originalName);
       } else if (i.type == 'audio') {
-        // 👈 ఆడియో ఫైల్స్ ని సేఫ్ గా Downloads ఫోల్డర్ లోకి కాపీ చేస్తున్నాం
         try {
           final downloadDir = Directory('/storage/emulated/0/Download');
           if (!await downloadDir.exists()) await downloadDir.create(recursive: true);
-          final dest = p.join(downloadDir.path, i.originalName ?? 'audio_${DateTime.now().millisecondsSinceEpoch}.mp3');
+          final dest = p.join(downloadDir.path, i.originalName.isNotEmpty ? i.originalName : 'audio_${DateTime.now().millisecondsSinceEpoch}.mp3');
           await File(i.encryptedPath).copy(dest);
         } catch (e) {
           debugPrint('Audio Export Error: $e');

@@ -1424,9 +1424,9 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
                   Center(
                     child: Column(
                       children: [
-                        Text('Vault Gallery v1.0.0', style: TextStyle(color: p.text, fontSize: 15, fontWeight: FontWeight.w800)),
+                        Text('Vault Gallery v1.1.1', style: TextStyle(color: p.text, fontSize: 15, fontWeight: FontWeight.w800)),
                         const SizedBox(height: 6),
-                        Text('Created by Shiva ❤️', style: TextStyle(color: p.sub, fontSize: 13, fontWeight: FontWeight.w600)),
+                        Text('Created by Shiva K ❤️', style: TextStyle(color: p.sub, fontSize: 13, fontWeight: FontWeight.w600)),
                       ],
                     ),
                   )
