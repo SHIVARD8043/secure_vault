@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:photo_manager/photo_manager.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
 // ════════════════════════════════════════════════════════════════════
 //  Colors passed in from the gallery palette (keeps _P private)
@@ -172,14 +174,38 @@ Future<T> _withProgress<T>(BuildContext context, Future<T> Function() job) async
 void _toast(BuildContext context, String m) =>
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
 
+// imports add cheyyi:
+
+
 Future<void> _share(BuildContext context, List<AssetEntity> items) async {
+  final tmp = await getTemporaryDirectory();
+  final dir = Directory(p.join(tmp.path, 'share_tmp'));
+  // Previous share files clean (share ayyaka ventane delete cheyyakudadu, target app inka chaduvutundi)
+  if (await dir.exists()) await dir.delete(recursive: true);
+  await dir.create(recursive: true);
+
   final files = <XFile>[];
-  for (final a in items) {
+  for (var i = 0; i < items.length; i++) {
+    final a = items[i];
     final f = await a.originFile;
-    if (f != null) files.add(XFile(f.path));
+    if (f == null) continue;
+
+    var title = await a.titleAsync;
+    if (title.isEmpty) title = p.basename(f.path);
+
+    // Same name untey overwrite avvakunda per-item subfolder
+    final sub = Directory(p.join(dir.path, '$i'));
+    await sub.create();
+    final out = File(p.join(sub.path, title));
+    await f.copy(out.path); // byte copy, EXIF intact
+    try {
+      await out.setLastModified(a.modifiedDateTime);
+    } catch (_) {}
+
+    files.add(XFile(out.path, mimeType: await a.mimeTypeAsync));
   }
   if (files.isEmpty) return;
-  await Share.shareXFiles(files); // newer share_plus: SharePlus.instance.share(ShareParams(files: files))
+  await Share.shareXFiles(files);
 }
 
 Future<bool> _copyOne(AssetEntity a, AlbumTarget t) async {

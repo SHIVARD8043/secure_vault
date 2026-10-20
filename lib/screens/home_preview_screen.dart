@@ -8,6 +8,7 @@ import 'package:photo_manager_image_provider/photo_manager_image_provider.dart';
 import 'package:provider/provider.dart';
 import 'package:image_cropper/image_cropper.dart';
 import '../core/theme_provider.dart';
+import '../core/taken_store.dart'; 
 
 // ─── GLASS WIDGET ───
 class _Glass extends StatelessWidget {
@@ -61,7 +62,10 @@ String _fmtSize(int b) {
 Future<Map<String, String>> _loadMeta(AssetEntity asset) async {
   final out = <String, String>{};
   out['Name'] = asset.title ?? 'Unknown';
-  out['Created'] = DateFormat('EEE, d MMM yyyy • h:mm a').format(asset.createDateTime);
+  
+  // 👈 ఇక్కడ మన TakenStore వాడి అసలైన EXIF డేట్ ని చూపిస్తున్నాం!
+  final created = TakenStore.instance.dateOf(asset);
+  out['Created'] = DateFormat('EEE, d MMM yyyy • h:mm a').format(created);
   out['Modified'] = DateFormat('d MMM yyyy • h:mm a').format(asset.modifiedDateTime);
   
   final f = await asset.originFile;
@@ -76,15 +80,89 @@ Future<Map<String, String>> _loadMeta(AssetEntity asset) async {
     out['Type'] = '-';
   }
   
-  out['Resolution'] = '${asset.width} × ${asset.height}  (${(asset.width * asset.height / 1e6).toStringAsFixed(1)} MP)';
+  // 👈 ఇక్కడ మిస్సయిన '*' ని యాడ్ చేశాను. (ప్లస్ ఆడియో ఫైల్స్ కి రాకుండా కండిషన్ పెట్టాను)
+  if (asset.width > 0 && asset.height > 0) {
+    out['Resolution'] = '${asset.width} × ${asset.height}  (${((asset.width * asset.height) / 1e6).toStringAsFixed(1)} MP)';
+  }
+  
   return out;
+}
+
+Future<DateTime?> _pickDateTime(BuildContext context, DateTime initial) async {
+  final date = await showDatePicker(
+    context: context,
+    initialDate: initial,
+    firstDate: DateTime(1970),
+    lastDate: DateTime(2100),
+    helpText: 'Choose photo date',
+  );
+  if (date == null || !context.mounted) return null;
+  final time = await showTimePicker(
+    context: context,
+    initialTime: TimeOfDay.fromDateTime(initial),
+    helpText: 'Choose photo time',
+  );
+  if (time == null) return null;
+  return DateTime(date.year, date.month, date.day, time.hour, time.minute, initial.second);
+}
+
+Future<void> _editMetaDates(BuildContext context, AppPalette p, AssetEntity item) async {
+  DateTime taken = TakenStore.instance.dateOf(item);
+  DateTime modified = item.modifiedDateTime;
+  final newTaken = await _pickDateTime(context, taken);
+  if (newTaken == null || !context.mounted) return;
+  final newModified = await _pickDateTime(context, modified);
+  if (newModified == null || !context.mounted) return;
+
+  final confirm = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      backgroundColor: p.surface,
+      title: Text('Save date changes?', style: TextStyle(color: p.text)),
+      content: Text(
+        'This will try to update the image EXIF dates and Gallery dates. Android may ask permission to modify this photo.',
+        style: TextStyle(color: p.sub),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+        FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Save changes')),
+      ],
+    ),
+  );
+  if (confirm != true || !context.mounted) return;
+
+  try {
+    final result = await const MethodChannel('gallery/metadata').invokeMethod<dynamic>(
+      'updateImageDates',
+      {
+        'assetId': item.id,
+        'takenMs': newTaken.millisecondsSinceEpoch,
+        'modifiedMs': newModified.millisecondsSinceEpoch,
+      },
+    );
+    if (!context.mounted) return;
+    final ok = result == true || (result is Map && result['success'] == true);
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(ok
+          ? 'Photo dates updated. Reopen Details to verify.'
+          : 'Could not update dates. Android may not allow editing this file.'),
+    ));
+  } on PlatformException catch (e) {
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(e.message ?? 'Date update failed.'),
+    ));
+  } catch (_) {
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Date update failed.')));
+  }
 }
 
 Future<void> _showMeta(BuildContext context, AppPalette p, AssetEntity item) {
   return showModalBottomSheet<void>(
     context: context, backgroundColor: p.surface, isScrollControlled: true,
     shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
-    builder: (_) => FutureBuilder<Map<String, String>>(
+    builder: (sheetContext) => FutureBuilder<Map<String, String>>(
       future: _loadMeta(item),
       builder: (ctx, snap) {
         final m = snap.data;
@@ -95,7 +173,16 @@ Future<void> _showMeta(BuildContext context, AppPalette p, AssetEntity item) {
                 ? SizedBox(height: 160, child: Center(child: CircularProgressIndicator(color: p.accent)))
                 : SingleChildScrollView(
                     child: Column(mainAxisSize: MainAxisSize.min, children: [
-                      Text('Details', style: TextStyle(color: p.text, fontSize: 18, fontWeight: FontWeight.w800)),
+                      Row(children: [
+                        Expanded(child: Text('Details', style: TextStyle(color: p.text, fontSize: 18, fontWeight: FontWeight.w800))),
+                        IconButton(
+                          tooltip: 'Edit dates',
+                          onPressed: () async {
+                            await _editMetaDates(sheetContext, p, item);
+                          },
+                          icon: Icon(Icons.edit_calendar_rounded, color: p.accent),
+                        ),
+                      ]),
                       const SizedBox(height: 8),
                       for (final e in m.entries)
                         Padding(
@@ -105,6 +192,11 @@ Future<void> _showMeta(BuildContext context, AppPalette p, AssetEntity item) {
                             Expanded(child: SelectableText(e.value, style: TextStyle(color: p.text, fontSize: 14, fontWeight: FontWeight.w600))),
                           ]),
                         ),
+                      const SizedBox(height: 4),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text('Edit icon tho EXIF / Gallery dates march cheyyachu.', style: TextStyle(color: p.sub, fontSize: 11)),
+                      ),
                     ]),
                   ),
           ),
@@ -164,8 +256,10 @@ class _HomePreviewScreenState extends State<HomePreviewScreen> with SingleTicker
   void _showSystemUi() => SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
 
   void _toggleChrome() {
+    // Keep the system UI mode unchanged while toggling the overlay.
+    // Switching immersive/edge-to-edge here changes the viewport and can
+    // make the image appear to jump/zoom when the toolbar is shown.
     setState(() => _chrome = !_chrome);
-    SystemChrome.setEnabledSystemUIMode(_chrome ? SystemUiMode.edgeToEdge : SystemUiMode.immersiveSticky);
   }
 
   void _precacheAround(int i) {
@@ -284,7 +378,8 @@ class _HomePreviewScreenState extends State<HomePreviewScreen> with SingleTicker
                 child: _Glass(
                   p: dp, radius: 0, blur: 26, border: Border(bottom: BorderSide(color: dp.border)),
                   child: Padding(
-                    padding: EdgeInsets.only(top: mq.padding.top),
+                    // viewPadding remains stable when the system bars are hidden.
+                    padding: EdgeInsets.only(top: mq.viewPadding.top),
                     child: SizedBox(
                       height: 56,
                       child: Row(children: [

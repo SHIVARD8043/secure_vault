@@ -1,47 +1,76 @@
 import 'database_helper.dart';
 import 'vault_item_model.dart';
+import 'package:sqflite/sqflite.dart';
 
-const _table = 'vault_items'; // change if your table name differs
-
-VaultItem _fromMap(Map<String, dynamic> e) => VaultItem(
-      id: e['id'],
-      originalName: e['originalName'],
-      encryptedPath: e['encryptedPath'],
-      thumbnailPath: e['thumbnailPath'],
-      type: e['type'],
-      albumName: e['albumName'],
-      addedDate: e['addedDate'],
-      isDeleted: e['isDeleted'],
-    );
+const _table = 'vault_items';
 
 extension VaultQueries on DatabaseHelper {
   Future<List<Map<String, dynamic>>> fetchAlbums() async {
     final db = await database;
+
     return db.rawQuery('''
-      SELECT v.albumName AS albumName, COUNT(*) AS cnt,
-        (SELECT COALESCE(v2.thumbnailPath, v2.encryptedPath) FROM $_table v2
-          WHERE v2.albumName = v.albumName 
-          AND v2.isDeleted = 0 
-          AND v2.type != 'folder' 
-          AND v2.type != 'audio' -- 👈 ఆడియో ఫైల్స్ కవర్ ఫోటోగా రాకుండా ఆపుతున్నాం
-          ORDER BY v2.id DESC LIMIT 1) AS cover
-      FROM $_table v WHERE v.isDeleted = 0 AND v.type != 'folder' -- 👈 ఫోల్డర్స్ ని కౌంట్ లోకి రాకుండా ఆపుతున్నాం
-      GROUP BY v.albumName ORDER BY MAX(v.id) DESC''');
+      SELECT
+        a.albumName AS albumName,
+
+        COUNT(v.id) AS cnt,
+
+        (
+          SELECT COALESCE(v2.thumbnailPath, v2.encryptedPath)
+          FROM vault_items v2
+          WHERE v2.albumName = a.albumName
+            AND v2.isDeleted = 0
+            AND v2.type != 'folder'
+            AND v2.type != 'audio'
+          ORDER BY v2.id DESC
+          LIMIT 1
+        ) AS cover
+
+      FROM vault_albums a
+
+      LEFT JOIN vault_items v
+        ON v.albumName = a.albumName
+        AND v.isDeleted = 0
+        AND v.type != 'folder'
+
+      GROUP BY a.id, a.albumName
+
+      ORDER BY a.id DESC
+    ''');
+  }
+
+  Future<void> createAlbum(String name) async {
+    final albumName = name.trim();
+
+    if (albumName.isEmpty) {
+      throw ArgumentError('Album name cannot be empty');
+    }
+
+    final db = await database;
+
+    await db.insert(
+      'vault_albums',
+      {
+        'albumName': albumName,
+        'createdDate': DateTime.now().toIso8601String(),
+      },
+      conflictAlgorithm: ConflictAlgorithm.ignore,
+    );
   }
 
   Future<List<VaultItem>> fetchByAlbum(String album) async {
     final db = await database;
     final rows = await db.query(_table,
-        where: 'albumName = ? AND isDeleted = 0 AND type != ?', 
-        whereArgs: [album, 'folder'], // 👈 డమ్మీ ఫోల్డర్స్ లిస్ట్ లోకి రాకుండా
+        where: 'albumName = ? AND isDeleted = 0 AND type != ?',
+        whereArgs: [album, 'folder'],
         orderBy: 'id DESC');
-    return rows.map(_fromMap).toList();
+    // 👈 ఇక్కడ డైరెక్ట్ గా మోడల్ లోని fromMap వాడుతున్నావ్, సూపర్!
+    return rows.map(VaultItem.fromMap).toList();
   }
 
   Future<List<VaultItem>> fetchTrash() async {
     final db = await database;
     final rows = await db.query(_table, where: 'isDeleted = 1', orderBy: 'id DESC');
-    return rows.map(_fromMap).toList();
+    return rows.map(VaultItem.fromMap).toList();
   }
 
   String _in(List<int> ids) => List.filled(ids.length, '?').join(',');
@@ -64,11 +93,5 @@ extension VaultQueries on DatabaseHelper {
     if (ids.isEmpty) return;
     final db = await database;
     await db.delete(_table, where: 'id IN (${_in(ids)})', whereArgs: ids);
-  }
-  
-  Future<List<VaultItem>> fetchAll() async {
-    final db = await database;
-    final rows = await db.query(_table, orderBy: 'id ASC'); // trash items kuda
-    return rows.map(_fromMap).toList();
-  }
+  }  
 }

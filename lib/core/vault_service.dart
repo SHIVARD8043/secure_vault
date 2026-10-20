@@ -1,17 +1,21 @@
 import 'dart:io';
 import 'dart:math';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
+import 'package:mime/mime.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:photo_manager/photo_manager.dart';
-import 'package:flutter/foundation.dart';
 import '../db/database_helper.dart';
 import '../db/vault_item_model.dart';
+import 'package:exif/exif.dart';
 
 class VaultService {
   static final _rand = Random();
+  static const _ch = MethodChannel('vault/export');
 
   Future<Directory> _dir(String sub) async {
-    final base = await getApplicationSupportDirectory(); // sandboxed, not visible in file manager
+    final base = await getApplicationSupportDirectory(); // sandboxed
     final d = Directory(p.join(base.path, 'Vault', sub));
     if (!await d.exists()) await d.create(recursive: true);
     return d;
@@ -22,33 +26,35 @@ class VaultService {
       final src = await asset.originFile;
       if (src == null) return false;
 
-      // 👈 1. Cache ఫైల్ నుండి కాకుండా, Original Asset నుండే రియల్ డీటెయిల్స్ లాగుతున్నాం! 🔥
       final realTitle = asset.title ?? p.basename(src.path);
-      final realModified = asset.modifiedDateTime; 
-      final realCreated = asset.createDateTime;    
+      final realModified = asset.modifiedDateTime;
+      final realCreated = asset.createDateTime;
+
+      // Images ki EXIF DateTimeOriginal first, fail aithe createDateTime fallback.
+      int takenMs = realCreated.millisecondsSinceEpoch;
+      if (asset.type == AssetType.image) {
+        takenMs = await _exifTakenMs(src) ?? takenMs;
+      }
 
       final media = await _dir('media');
       final thumbs = await _dir('thumbs');
       final id = '${DateTime.now().microsecondsSinceEpoch}_${_rand.nextInt(9999)}';
-      
-      // ఒరిజినల్ ఫైల్ ఎక్స్‌టెన్షన్ (.jpg/.png) ని తీసుకుంటున్నాం
-      final ext = realTitle.contains('.') ? '.${realTitle.split('.').last}' : p.extension(src.path);
+
+      final ext = realTitle.contains('.')
+          ? '.${realTitle.split('.').last}'
+          : p.extension(src.path);
       final dest = p.join(media.path, '$id$ext');
       final destFile = File(dest);
 
-      await src.copy(dest); 
+      await src.copy(dest);
       if (await destFile.length() != await src.length()) {
         await destFile.delete();
         return false;
       }
 
-      // 👈 2. వాల్ట్ లోకి వచ్చిన ఫైల్ కి కచ్చితంగా పాత Original Dates సెట్ చేస్తున్నాం!
       try {
         await destFile.setLastModified(realModified);
-        await destFile.setLastAccessed(realCreated);
-      } catch (_) {
-        // OS permissions ఇవ్వకపోతే స్కిప్ అవుతుంది, కానీ DB లో పక్కాగా సేవ్ అవుతుంది
-      }
+      } catch (_) {}
 
       String? thumbPath;
       final bytes = await asset.thumbnailDataWithSize(const ThumbnailSize(400, 400), quality: 80);
@@ -57,21 +63,39 @@ class VaultService {
         await File(thumbPath).writeAsBytes(bytes);
       }
 
-      // 👈 3. Database లో పిచ్చి పేర్లు కాకుండా, 'realTitle' మరియు 'realCreated' సేవ్ చేస్తున్నాం!
       final item = VaultItem(
-        originalName: realTitle, // పక్కాగా IMG_20261011_12345.jpg లాంటి ఒరిజినల్ నేమ్ సేవ్ అవుతుంది
+        originalName: realTitle,
         encryptedPath: dest,
         thumbnailPath: thumbPath,
         type: asset.type == AssetType.video ? 'video' : 'image',
         albumName: album,
-        addedDate: realCreated.toIso8601String(), // ఒరిజినల్ గా ఫోటో తీసిన ఎక్సాక్ట్ డేట్ సేవ్ అవుతుంది
-        isDeleted: trash ? 1 : 0, 
+        addedDate: DateTime.fromMillisecondsSinceEpoch(takenMs).toIso8601String(),
+        isDeleted: trash ? 1 : 0,
+        takenMs: takenMs,
+        modifiedMs: realModified.millisecondsSinceEpoch,
       );
       await DatabaseHelper.instance.insertItem(item.toMap());
       return true;
     } catch (e) {
       debugPrint('Hide Error: $e');
       return false;
+    }
+  }
+
+  /// EXIF DateTimeOriginal -> ms. Images ki matrame; fail aithe null.
+  Future<int?> _exifTakenMs(File f) async {
+    try {
+      final tags = await readExifFromFile(f);
+      final raw = (tags['EXIF DateTimeOriginal'] ??
+              tags['EXIF DateTimeDigitized'] ??
+              tags['Image DateTime'])
+          ?.printable; // "2023:08:15 14:32:10"
+      if (raw == null || raw.length < 19 || raw.startsWith('0000')) return null;
+      final d = raw.substring(0, 10).replaceAll(':', '-');
+      final dt = DateTime.tryParse('$d ${raw.substring(11, 19)}');
+      return dt?.millisecondsSinceEpoch;
+    } catch (_) {
+      return null;
     }
   }
 
@@ -86,23 +110,48 @@ class VaultService {
     await DatabaseHelper.instance.removeRows(items.map((e) => e.id!).toList());
   }
 
-  Future<void> exportToGallery(List<VaultItem> items, {bool removeFromVault = true}) async {
+  String _mimeFor(VaultItem i) {
+    final guess = lookupMimeType(i.originalName) ?? lookupMimeType(i.encryptedPath);
+    if (guess != null) return guess;
+    switch (i.type) {
+      case 'video':
+        return 'video/mp4';
+      case 'audio':
+        return 'audio/mpeg';
+      default:
+        return 'image/jpeg';
+    }
+  }
+
+  /// Returns the number of items that FAILED to export.
+  /// Only items that were saved successfully are removed from the vault.
+  Future<int> exportToGallery(List<VaultItem> items, {bool removeFromVault = true}) async {
+    final done = <VaultItem>[];
+    var failed = 0;
+
     for (final i in items) {
-      if (i.type == 'video') {
-        await PhotoManager.editor.saveVideo(File(i.encryptedPath), title: i.originalName);
-      } else if (i.type == 'audio') {
-        try {
-          final downloadDir = Directory('/storage/emulated/0/Download');
-          if (!await downloadDir.exists()) await downloadDir.create(recursive: true);
-          final dest = p.join(downloadDir.path, i.originalName.isNotEmpty ? i.originalName : 'audio_${DateTime.now().millisecondsSinceEpoch}.mp3');
-          await File(i.encryptedPath).copy(dest);
-        } catch (e) {
-          debugPrint('Audio Export Error: $e');
+      try {
+        final ok = await _ch.invokeMethod<bool>('save', {
+          'path': i.encryptedPath,
+          'name': i.originalName.isNotEmpty
+              ? i.originalName
+              : 'vault_${DateTime.now().millisecondsSinceEpoch}${p.extension(i.encryptedPath)}',
+          'mime': _mimeFor(i),
+          'takenMs': i.effectiveTakenMs,
+          'modifiedMs': i.effectiveModifiedMs,
+        });
+        if (ok == true) {
+          done.add(i);
+        } else {
+          failed++;
         }
-      } else {
-        await PhotoManager.editor.saveImageWithPath(i.encryptedPath, title: i.originalName);
+      } catch (e) {
+        debugPrint('Export Error: $e');
+        failed++;
       }
     }
-    if (removeFromVault) await deleteForever(items);
+
+    if (removeFromVault && done.isNotEmpty) await deleteForever(done);
+    return failed;
   }
 }

@@ -138,16 +138,48 @@ class _DeviceAlbumScreenState extends State<DeviceAlbumScreen> {
   }
 
   Future<void> _loadAlbumAssets() async {
-    final count = await widget.album.assetCountAsync;
-    final assets = await widget.album.getAssetListRange(start: 0, end: count);
-    if (mounted) {
+    try {
+      final count = await widget.album.assetCountAsync;
+
+      final assets = await widget.album.getAssetListRange(
+        start: 0,
+        end: count,
+      );
+
+      // Best fallback: sort using the date reported by Android/gallery.
+      // Newest photos/videos first.
+      assets.sort((a, b) {
+        final aDate = a.createDateTime;
+        final bDate = b.createDateTime;
+
+        final dateCompare = bDate.compareTo(aDate);
+
+        // Stable fallback when dates are identical.
+        if (dateCompare == 0) {
+          return b.id.compareTo(a.id);
+        }
+
+        return dateCompare;
+      });
+
+      if (!mounted) return;
+
       setState(() {
         _items = assets;
         _loading = false;
       });
+    } catch (e, stackTrace) {
+      debugPrint('Load album assets error: $e');
+      debugPrintStack(stackTrace: stackTrace);
+
+      if (!mounted) return;
+
+      setState(() {
+        _items = [];
+        _loading = false;
+      });
     }
   }
-
   void _toggle(AssetEntity a) {
     setState(() {
       _selected.contains(a.id) ? _selected.remove(a.id) : _selected.add(a.id);
@@ -265,6 +297,59 @@ class _DeviceAlbumScreenState extends State<DeviceAlbumScreen> {
     );
   }
 
+
+  double _operationProgress = 0;
+  String _operationLabel = 'Preparing...';
+  StateSetter? _progressDialogSetState;
+
+  void _showOperationProgress(String title) {
+    _operationProgress = 0;
+    _operationLabel = title;
+    _progressDialogSetState = null;
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setDialogState) {
+          _progressDialogSetState = setDialogState;
+          return AlertDialog(
+            backgroundColor: context.read<ThemeProvider>().p.surface,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+            title: Text(title, style: TextStyle(color: context.read<ThemeProvider>().p.text, fontWeight: FontWeight.w700)),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(_operationLabel, style: TextStyle(color: context.read<ThemeProvider>().p.sub, fontSize: 13)),
+                const SizedBox(height: 14),
+                LinearProgressIndicator(value: _operationProgress, minHeight: 7),
+                const SizedBox(height: 10),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: Text('${(_operationProgress * 100).round()}%',
+                    style: TextStyle(color: context.read<ThemeProvider>().p.text, fontWeight: FontWeight.bold)),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  void _updateOperationProgress(int completed, int total, String label) {
+    _operationProgress = total <= 0 ? 1 : completed / total;
+    _operationLabel = '$label ($completed/$total)';
+    _progressDialogSetState?.call(() {});
+  }
+
+  void _closeOperationProgress() {
+    _progressDialogSetState = null;
+    if (mounted && Navigator.of(context).canPop()) {
+      Navigator.of(context).pop();
+    }
+  }
+
   // ── ACTIONS ──
   Future<void> _shareSelected() async {
     final chosen = _items.where((a) => _selected.contains(a.id)).toList();
@@ -302,21 +387,29 @@ class _DeviceAlbumScreenState extends State<DeviceAlbumScreen> {
     if (target == null || !mounted) return;
     if (!await _showConfirmDialog(p, 'Move to Vault', 'ఈ ${chosen.length} ఫోటోలను వాల్ట్ లోకి మార్చాలా?', 'Move')) return;
 
-    showDialog(context: context, barrierDismissible: false, builder: (_) => const Center(child: CircularProgressIndicator()));
+    _showOperationProgress('Moving to Vault');
     final vault = VaultService();
     final idsToDelete = <String>[];
     int ok = 0;
-
-    for (final a in chosen) {
-      if (await vault.hideAsset(a, target)) {
-        ok++;
-        idsToDelete.add(a.id);
+    try {
+      for (int i = 0; i < chosen.length; i++) {
+        final a = chosen[i];
+        if (await vault.hideAsset(a, target)) {
+          ok++;
+          idsToDelete.add(a.id);
+        }
+        _updateOperationProgress(i + 1, chosen.length, 'Moving items');
       }
+      if (idsToDelete.isNotEmpty) {
+        _operationLabel = 'Removing originals...';
+        _progressDialogSetState?.call(() {});
+        await PhotoManager.editor.deleteWithIds(idsToDelete);
+      }
+    } finally {
+      _closeOperationProgress();
     }
-    if (idsToDelete.isNotEmpty) await PhotoManager.editor.deleteWithIds(idsToDelete);
 
     if (mounted) {
-      Navigator.pop(context);
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$ok items moved to Vault 🔒')));
       setState(() => _selected.clear());
       _loadAlbumAssets();
@@ -329,15 +422,20 @@ class _DeviceAlbumScreenState extends State<DeviceAlbumScreen> {
     final target = await _showLocalAlbumPicker(p, 'Copy to Album');
     if (target == null || !mounted) return;
 
-    showDialog(context: context, barrierDismissible: false, builder: (_) => const Center(child: CircularProgressIndicator()));
+    _showOperationProgress('Copying to ${target.name}');
     int ok = 0;
-    for (final a in chosen) {
-      final newAsset = await PhotoManager.editor.copyAssetToPath(asset: a, pathEntity: target);
-      if (newAsset != null) ok++;
+    try {
+      for (int i = 0; i < chosen.length; i++) {
+        final a = chosen[i];
+        final newAsset = await PhotoManager.editor.copyAssetToPath(asset: a, pathEntity: target);
+        if (newAsset != null) ok++;
+        _updateOperationProgress(i + 1, chosen.length, 'Copying items');
+      }
+    } finally {
+      _closeOperationProgress();
     }
-    
+
     if (mounted) {
-      Navigator.pop(context);
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$ok items copied to ${target.name} 📄')));
       setState(() => _selected.clear());
     }
@@ -350,17 +448,26 @@ class _DeviceAlbumScreenState extends State<DeviceAlbumScreen> {
     if (target == null || !mounted) return;
     if (!await _showConfirmDialog(p, 'Move Photos', 'ఈ ${chosen.length} ఐటెమ్స్ ని ${target.name} లోకి మూవ్ చేయాలా?', 'Move')) return;
 
-    showDialog(context: context, barrierDismissible: false, builder: (_) => const Center(child: CircularProgressIndicator()));
+    _showOperationProgress('Moving to ${target.name}');
     int ok = 0;
     final idsToDelete = <String>[];
-    for (final a in chosen) {
-      final newAsset = await PhotoManager.editor.copyAssetToPath(asset: a, pathEntity: target);
-      if (newAsset != null) { ok++; idsToDelete.add(a.id); }
+    try {
+      for (int i = 0; i < chosen.length; i++) {
+        final a = chosen[i];
+        final newAsset = await PhotoManager.editor.copyAssetToPath(asset: a, pathEntity: target);
+        if (newAsset != null) { ok++; idsToDelete.add(a.id); }
+        _updateOperationProgress(i + 1, chosen.length, 'Moving items');
+      }
+      if (idsToDelete.isNotEmpty) {
+        _operationLabel = 'Removing originals...';
+        _progressDialogSetState?.call(() {});
+        await PhotoManager.editor.deleteWithIds(idsToDelete);
+      }
+    } finally {
+      _closeOperationProgress();
     }
-    if (idsToDelete.isNotEmpty) await PhotoManager.editor.deleteWithIds(idsToDelete);
 
     if (mounted) {
-      Navigator.pop(context);
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$ok items moved to ${target.name} 🚀')));
       setState(() => _selected.clear());
       _loadAlbumAssets();

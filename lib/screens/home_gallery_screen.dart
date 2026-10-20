@@ -10,14 +10,16 @@ import 'package:photo_manager/photo_manager.dart';
 import 'package:photo_manager_image_provider/photo_manager_image_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:provider/provider.dart';
 import '../core/vault_service.dart';
+import '../core/theme_provider.dart';
+import '../core/taken_store.dart'; // 👈 1. TakenStore ని ఇంపోర్ట్ చేశాం
 import '../db/database_helper.dart';
 import 'albums_screen.dart';
 import 'home_preview_screen.dart';
 import 'video_player_screen.dart';
-import 'package:provider/provider.dart';
-import '../core/theme_provider.dart';
 import 'device_album_screen.dart';
+import 'photo_preview_screen.dart';
 
 // ════════════════════════════════════════════════════════════════════
 //  PALETTE, GLASS WIDGET & SHARED BUTTONS
@@ -495,6 +497,8 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
   _P get _pal => _P.mix(Curves.easeInOut.transform(_themeCtrl.value));
 
   bool _fromAlbums = false;
+  bool _searchOpen = false;
+  String _searchQuery = '';
 
   bool _dragActive = false, _dragSelect = true;
   int _anchor = 0, _lastIdx = -1;
@@ -592,11 +596,17 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     final want = math.max(_pageSize, _items.length);
     final first = await _album!.getAssetListRange(start: 0, end: want);
     if (!mounted || gen != _gen) return;
+    
+    // 👈 2. TakenStore తో ఎక్సాక్ట్ డేట్స్ ని క్యాచ్ (cache) చేస్తున్నాం
+    await TakenStore.instance.fill(first);
+    if (!mounted || gen != _gen) return;
+
     setState(() {
       _items..clear()..addAll(first);
       _items.sort((a, b) {
+        // 👈 3. సార్టింగ్ లో TakenStore EXIF డేట్ వాడుతున్నాం 
         return _sortType == 0 
-            ? b.createDateTime.compareTo(a.createDateTime)
+            ? TakenStore.instance.dateOf(b).compareTo(TakenStore.instance.dateOf(a))
             : b.modifiedDateTime.compareTo(a.modifiedDateTime);
       });
       _hasMore = first.length == want;
@@ -614,11 +624,17 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     try {
       final batch = await _album!.getAssetListRange(start: _items.length, end: _items.length + size);
       if (!mounted || gen != _gen) return;
+      
+      // 👈 TakenStore లోకి లోడ్ చేస్తున్నాం
+      await TakenStore.instance.fill(batch);
+      if (!mounted || gen != _gen) return;
+
       setState(() {
         _items.addAll(batch);
         _items.sort((a, b) {
+          // 👈 సార్టింగ్ లో TakenStore EXIF డేట్ వాడుతున్నాం 
           return _sortType == 0 
-              ? b.createDateTime.compareTo(a.createDateTime)
+              ? TakenStore.instance.dateOf(b).compareTo(TakenStore.instance.dateOf(a))
               : b.modifiedDateTime.compareTo(a.modifiedDateTime);
         });
         if (batch.length < size) _hasMore = false;
@@ -641,7 +657,8 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     String? lastKey;
     for (var i = 0; i < _items.length; i++) {
       final a = _items[i];
-      final d = _sortType == 0 ? a.createDateTime : a.modifiedDateTime;
+      // 👈 4. ఇక్కడ కూడా గ్రూప్ టైటిల్స్ కి TakenStore డేట్ వాడుతున్నాం
+      final d = _sortType == 0 ? TakenStore.instance.dateOf(a) : a.modifiedDateTime;
       final day = DateTime(d.year, d.month, d.day);
       final String key = day == today ? 'T' : day == yesterday ? 'Y' : d.year == now.year ? 'd${day.millisecondsSinceEpoch}' : 'm${d.year}-${d.month}';
       if (key != lastKey) {
@@ -819,7 +836,6 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     );
   }
 
-  // 👈 ప్రోగ్రెస్ చూపించడానికి ఒక చిన్న హెల్పర్ డైలాగ్
   void _showProgressDialog(String title, int total, ValueNotifier<int> progress) {
     final p = _pal;
     showDialog(
@@ -888,7 +904,7 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
 
     for (int i = 0; i < chosen.length; i++) {
       final a = chosen[i];
-      progress.value = i + 1; // 👈 ప్రోగ్రెస్ నంబర్ అప్‌డేట్
+      progress.value = i + 1; 
       
       bool isDup = existing.any((e) => e.originalName == a.title && e.albumName == targetAlbum && e.isDeleted == 0);
       if (isDup) {
@@ -900,7 +916,7 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     }
 
     if (!mounted) return;
-    Navigator.pop(context); // Close Progress Dialog
+    Navigator.pop(context); 
     
     final msg = skippedCount > 0 
         ? '$successCount copied to $targetAlbum, $skippedCount skipped (duplicate)'
@@ -927,7 +943,7 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
 
     for (int i = 0; i < chosen.length; i++) {
       final a = chosen[i];
-      progress.value = i + 1; // 👈 ప్రోగ్రెస్ నంబర్ అప్‌డేట్
+      progress.value = i + 1; 
 
       bool isDup = existing.any((e) => e.originalName == a.title && e.albumName == targetAlbum && e.isDeleted == 0);
       if (isDup) {
@@ -947,7 +963,7 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     }
 
     if (!mounted) return;
-    Navigator.pop(context); // Close Progress Dialog
+    Navigator.pop(context); 
     
     final msg = skippedCount > 0 
         ? '$successCount moved to $targetAlbum, $skippedCount skipped (duplicate)'
@@ -971,7 +987,7 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
 
     for (int i = 0; i < chosen.length; i++) {
       final a = chosen[i];
-      progress.value = i + 1; // 👈 ప్రోగ్రెస్ నంబర్ అప్‌డేట్
+      progress.value = i + 1; 
 
       bool isDup = existing.any((e) => e.originalName == a.title && e.albumName == 'My_Photos' && e.isDeleted == 1);
       if (isDup) {
@@ -990,7 +1006,7 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     }
 
     if (!mounted) return;
-    Navigator.pop(context); // Close Progress Dialog
+    Navigator.pop(context); 
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$successCount items moved to Vault Bin 🗑️')));
     setState(_selected.clear);
     await _reload();
@@ -1033,6 +1049,51 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
               body: DecoratedBox(
                 decoration: BoxDecoration(gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [p.bg, p.bg2])),
                 child: Stack(children: [
+                  // Subtle ambient glow — decorative only, does not intercept taps.
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: RepaintBoundary(
+                        child: Stack(
+                          children: [
+                            Positioned(
+                              top: -100,
+                              right: -90,
+                              child: Container(
+                                width: 260,
+                                height: 260,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  gradient: RadialGradient(
+                                    colors: [
+                                      p.accent.withValues(alpha: _light ? 0.10 : 0.16),
+                                      p.accent.withValues(alpha: 0.0),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                            Positioned(
+                              top: 250,
+                              left: -130,
+                              child: Container(
+                                width: 260,
+                                height: 260,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  gradient: RadialGradient(
+                                    colors: [
+                                      p.accent.withValues(alpha: _light ? 0.05 : 0.09),
+                                      p.accent.withValues(alpha: 0.0),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
                   Positioned.fill(
                     child: TabBarView(
                       controller: _tabs,
@@ -1149,13 +1210,12 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     return Positioned(
       top: 0, left: 0, right: 0,
       child: ClipRRect(
-        // 👈 Curve alane uncham
         borderRadius: const BorderRadius.vertical(bottom: Radius.circular(32)),
         child: BackdropFilter(
           filter: ImageFilter.blur(sigmaX: 30, sigmaY: 30),
           child: DecoratedBox(
             decoration: BoxDecoration(
-              color: p.bar, // 👈 Gradient theesesi plain theme color (White) pettam
+              color: p.bar,
               borderRadius: const BorderRadius.vertical(bottom: Radius.circular(32)),
               border: Border.all(color: p.border, width: 1),
               boxShadow: [
@@ -1194,6 +1254,231 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     );
   }
 
+  Future<void> _showSearch() async {
+    if (_searchOpen) return;
+    if (_items.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No gallery items to search yet')),
+      );
+      return;
+    }
+
+    _searchOpen = true;
+    final p = _pal;
+    final ctrl = TextEditingController(text: _searchQuery);
+    try {
+      await showGeneralDialog<void>(
+        context: context,
+        barrierDismissible: true,
+        barrierLabel: 'Close search',
+        barrierColor: Colors.black.withValues(alpha: 0.58),
+        transitionDuration: const Duration(milliseconds: 260),
+        pageBuilder: (ctx, animation, secondaryAnimation) {
+          return StatefulBuilder(
+            builder: (ctx, setDialogState) {
+              final query = ctrl.text.trim().toLowerCase();
+              final results = query.isEmpty
+                  ? List<AssetEntity>.of(_items)
+                  : _items.where((a) {
+                      final title = (a.title ?? '').toLowerCase();
+                      final id = a.id.toLowerCase();
+                      final isVideo = a.type == AssetType.video;
+                      return title.contains(query) ||
+                          id.contains(query) ||
+                          (query == 'video' && isVideo) ||
+                          ((query == 'photo' || query == 'image') && !isVideo);
+                    }).toList(growable: false);
+
+              return SafeArea(
+                child: Material(
+                  type: MaterialType.transparency,
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
+                    child: Column(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(5),
+                          decoration: BoxDecoration(
+                            color: p.bar,
+                            borderRadius: BorderRadius.circular(25),
+                            border: Border.all(color: p.border),
+                            boxShadow: [
+                              BoxShadow(
+                                color: p.accent.withValues(alpha: 0.16),
+                                blurRadius: 30,
+                                spreadRadius: 1,
+                              ),
+                            ],
+                          ),
+                          child: Row(
+                            children: [
+                              const SizedBox(width: 12),
+                              Icon(Icons.search_rounded, color: p.accent, size: 24),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: TextField(
+                                  controller: ctrl,
+                                  autofocus: true,
+                                  style: TextStyle(color: p.text, fontSize: 16),
+                                  cursorColor: p.accent,
+                                  decoration: InputDecoration(
+                                    hintText: 'Search photos, videos…',
+                                    hintStyle: TextStyle(color: p.sub),
+                                    border: InputBorder.none,
+                                    isCollapsed: true,
+                                  ),
+                                  onChanged: (value) {
+                                    _searchQuery = value;
+                                    setDialogState(() {});
+                                  },
+                                ),
+                              ),
+                              IconButton(
+                                tooltip: 'Clear search',
+                                onPressed: () {
+                                  ctrl.clear();
+                                  _searchQuery = '';
+                                  setDialogState(() {});
+                                },
+                                icon: Icon(Icons.close_rounded, color: p.sub),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 14),
+                        Row(
+                          children: [
+                            Text(
+                              query.isEmpty ? 'Recent gallery items' : '${results.length} results',
+                              style: TextStyle(
+                                color: p.text,
+                                fontSize: 15,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                            const Spacer(),
+                            _Glass(
+                              p: p,
+                              radius: 14,
+                              blur: 12,
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                child: Text(
+                                  'PHOTO  •  VIDEO',
+                                  style: TextStyle(
+                                    color: p.sub,
+                                    fontSize: 9,
+                                    letterSpacing: 1,
+                                    fontWeight: FontWeight.w800,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 10),
+                        Expanded(
+                          child: results.isEmpty
+                              ? Center(
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(Icons.search_off_rounded, color: p.sub, size: 48),
+                                      const SizedBox(height: 10),
+                                      Text(
+                                        'Nothing found',
+                                        style: TextStyle(color: p.text, fontSize: 16, fontWeight: FontWeight.w700),
+                                      ),
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        'Try a file name or “photo” / “video”.',
+                                        style: TextStyle(color: p.sub, fontSize: 12),
+                                      ),
+                                    ],
+                                  ),
+                                )
+                              : GridView.builder(
+                                  keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+                                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                                    crossAxisCount: 3,
+                                    crossAxisSpacing: 7,
+                                    mainAxisSpacing: 7,
+                                  ),
+                                  itemCount: results.length,
+                                  itemBuilder: (_, i) {
+                                    final asset = results[i];
+                                    final provider = AssetEntityImageProvider(
+                                      asset,
+                                      isOriginal: false,
+                                      thumbnailSize: const ThumbnailSize.square(240),
+                                      thumbnailFormat: ThumbnailFormat.jpeg,
+                                    );
+                                    return GestureDetector(
+                                      onTap: () async {
+                                        Navigator.of(ctx).pop();
+                                        final idx = _items.indexWhere((e) => e.id == asset.id);
+                                        if (idx >= 0 && mounted) await _openPreview(idx);
+                                      },
+                                      child: ClipRRect(
+                                        borderRadius: BorderRadius.circular(13),
+                                        child: Stack(
+                                          fit: StackFit.expand,
+                                          children: [
+                                            Image(
+                                              image: provider,
+                                              fit: BoxFit.cover,
+                                              gaplessPlayback: true,
+                                              errorBuilder: (_, __, ___) => ColoredBox(
+                                                color: p.surface,
+                                                child: Icon(Icons.broken_image_rounded, color: p.sub),
+                                              ),
+                                            ),
+                                            if (asset.type == AssetType.video)
+                                              const Align(
+                                                alignment: Alignment.center,
+                                                child: DecoratedBox(
+                                                  decoration: BoxDecoration(
+                                                    color: Color(0x88000000),
+                                                    shape: BoxShape.circle,
+                                                  ),
+                                                  child: Padding(
+                                                    padding: EdgeInsets.all(7),
+                                                    child: Icon(Icons.play_arrow_rounded, color: Colors.white, size: 23),
+                                                  ),
+                                                ),
+                                              ),
+                                          ],
+                                        ),
+                                      ),
+                                    );
+                                  },
+                                ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            },
+          );
+        },
+        transitionBuilder: (ctx, animation, secondaryAnimation, child) {
+          final curved = CurvedAnimation(parent: animation, curve: Curves.easeOutCubic);
+          return FadeTransition(
+            opacity: curved,
+            child: SlideTransition(
+              position: Tween<Offset>(begin: const Offset(0, 0.045), end: Offset.zero).animate(curved),
+              child: child,
+            ),
+          );
+        },
+      );
+    } finally {
+      ctrl.dispose();
+      _searchOpen = false;
+    }
+  }
+
   Widget _normalBar(_P p) {
     return Row(key: const ValueKey('normal'), children: [
       const SizedBox(width: 18),
@@ -1206,6 +1491,11 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
             style: TextStyle(color: p.text, fontSize: 21, fontWeight: FontWeight.w800, letterSpacing: -0.5),
           ),
         ),
+      ),
+      IconButton(
+        tooltip: 'Search gallery',
+        icon: Icon(Icons.search_rounded, color: p.text),
+        onPressed: _showSearch,
       ),
       IconButton(
         icon: Icon(Icons.settings_rounded, color: p.text),
@@ -1342,8 +1632,7 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
                       },
                     ),
                   ),
-
-                  // 👈 ఇక్కడ కొత్తగా "సార్టింగ్" (Sorting) ఆప్షన్ పెట్టాను 
+                  
                   ListTile(
                     contentPadding: EdgeInsets.zero,
                     leading: Icon(Icons.sort_rounded, color: p.accent, size: 28),
@@ -1363,7 +1652,7 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
                           final sp = await SharedPreferences.getInstance();
                           await sp.setInt(_kSortKey, v);
                           Navigator.pop(ctx);
-                          _reload(); // సార్ట్ మార్చగానే ఆటోమేటిక్ గా ఫొటోస్ అప్‌డేట్ అవుతాయి
+                          _reload();
                         }
                       },
                     ),
@@ -1424,7 +1713,7 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
                   Center(
                     child: Column(
                       children: [
-                        Text('Vault Gallery v1.1.1', style: TextStyle(color: p.text, fontSize: 15, fontWeight: FontWeight.w800)),
+                        Text('Vault Gallery v1.1.3', style: TextStyle(color: p.text, fontSize: 15, fontWeight: FontWeight.w800)),
                         const SizedBox(height: 6),
                         Text('Created by Shiva K ❤️', style: TextStyle(color: p.sub, fontSize: 13, fontWeight: FontWeight.w600)),
                       ],

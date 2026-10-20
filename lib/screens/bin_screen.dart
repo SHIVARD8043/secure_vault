@@ -157,23 +157,32 @@ String _fmtSize(int b) {
 Future<Map<String, String>> _loadMeta(VaultItem item) async {
   final f = File(item.encryptedPath);
   final out = <String, String>{};
-  out['Name'] = item.encryptedPath.split(RegExp(r'[\\/]')).last;
+  
+  // 👈 ఒరిజినల్ నేమ్ ఉంటే అది, లేకపోతే పాత్ చూపిస్తుంది
+  out['Name'] = item.originalName ?? item.encryptedPath.split(RegExp(r'[\\/]')).last;
+  
+  // 👈 డేటాబేస్ లో ఉన్న అసలైన EXIF డేట్ ని తీసుకుంటున్నాం
   final added = _dateOf(item);
-  out['Added'] = added == null ? '-' : DateFormat('EEE, d MMM yyyy • h:mm a').format(added);
+  out['Date Taken'] = added == null ? '-' : DateFormat('EEE, d MMM yyyy • h:mm a').format(added);
+  
   out['Album'] = item.albumName;
   out['Status'] = 'In Recycle Bin 🗑️';
+  
   if (await f.exists()) {
     final st = await f.stat();
-    out['Modified'] = DateFormat('d MMM yyyy • h:mm a').format(st.modified);
     out['Size'] = _fmtSize(st.size);
     final ext = out['Name']!.contains('.') ? out['Name']!.split('.').last.toUpperCase() : '-';
     out['Type'] = ext;
-    try {
-      final buf = await ui.ImmutableBuffer.fromUint8List(await f.readAsBytes());
-      final d = await ui.ImageDescriptor.encoded(buf);
-      out['Resolution'] = '${d.width} × ${d.height}  (${((d.width * d.height) / 1e6).toStringAsFixed(1)} MP)';
-      d.dispose(); buf.dispose();
-    } catch (_) {}
+    
+    // 👈 ఆడియో ఫైల్స్ కాకపోతేనే రిజల్యూషన్ క్యాలిక్యులేట్ చేస్తుంది ('*' ఫిక్స్ చేశాను)
+    if (item.type != 'audio') {
+      try {
+        final buf = await ui.ImmutableBuffer.fromUint8List(await f.readAsBytes());
+        final d = await ui.ImageDescriptor.encoded(buf);
+        out['Resolution'] = '${d.width} × ${d.height}  (${((d.width * d.height) / 1e6).toStringAsFixed(1)} MP)';
+        d.dispose(); buf.dispose();
+      } catch (_) {}
+    }
   } else {
     out['Size'] = 'File missing';
   }

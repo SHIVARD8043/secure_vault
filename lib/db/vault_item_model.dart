@@ -8,6 +8,12 @@ class VaultItem {
   final String addedDate;
   final int isDeleted;
 
+  /// Original capture time (ms since epoch). Null for items hidden before DB v2.
+  final int? takenMs;
+
+  /// Original last-modified time (ms since epoch). Null for items hidden before DB v2.
+  final int? modifiedMs;
+
   VaultItem({
     this.id,
     required this.originalName,
@@ -17,9 +23,18 @@ class VaultItem {
     required this.albumName,
     required this.addedDate,
     this.isDeleted = 0,
+    this.takenMs,
+    this.modifiedMs,
   });
 
-  // డేటాబేస్ లోని Map ని VaultItem ఆబ్జెక్ట్ గా మార్చడానికి
+  /// Falls back to addedDate (which held the original date in old rows).
+  int get effectiveTakenMs =>
+      takenMs ??
+      (DateTime.tryParse(addedDate)?.millisecondsSinceEpoch ??
+          DateTime.now().millisecondsSinceEpoch);
+
+  int get effectiveModifiedMs => modifiedMs ?? effectiveTakenMs;
+
   factory VaultItem.fromMap(Map<String, dynamic> map) {
     return VaultItem(
       id: map['id'] as int?,
@@ -30,10 +45,11 @@ class VaultItem {
       albumName: map['albumName'] as String,
       addedDate: map['addedDate'] as String,
       isDeleted: map['isDeleted'] as int,
+      takenMs: map['takenMs'] as int?,
+      modifiedMs: map['modifiedMs'] as int?,
     );
   }
 
-  // VaultItem ఆబ్జెక్ట్ ని డేటాబేస్ లో సేవ్ చేయడానికి Map గా మార్చడానికి
   Map<String, dynamic> toMap() {
     return {
       if (id != null) 'id': id,
@@ -44,6 +60,8 @@ class VaultItem {
       'albumName': albumName,
       'addedDate': addedDate,
       'isDeleted': isDeleted,
+      'takenMs': takenMs,
+      'modifiedMs': modifiedMs,
     };
   }
 }

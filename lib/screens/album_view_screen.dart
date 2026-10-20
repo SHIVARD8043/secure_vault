@@ -4,6 +4,7 @@ import 'dart:ui' show ImageFilter;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
+import 'package:exif/exif.dart';
 import 'package:collection/collection.dart';
 import 'package:photo_view/photo_view.dart';
 import 'package:photo_view/photo_view_gallery.dart';
@@ -154,8 +155,41 @@ Future<String?> _pickAlbum(BuildContext context, String title, AppPalette p, {St
 }
 
 DateTime? _dateOf(VaultItem item) {
-  try { if (item.addedDate != null) return DateTime.tryParse(item.addedDate.toString()); } catch (_) {}
-  return null;
+  // Prefer the stored capture timestamp, then fall back to the stored date string.
+  final takenMs = item.takenMs;
+  if (takenMs != null && takenMs > 0) {
+    return DateTime.fromMillisecondsSinceEpoch(takenMs);
+  }
+  return DateTime.tryParse(item.addedDate.toString());
+}
+
+DateTime _effectiveSortDate(VaultItem item, int sortType) {
+  if (sortType == 1) {
+    final modifiedMs = item.modifiedMs;
+    if (modifiedMs != null && modifiedMs > 0) {
+      return DateTime.fromMillisecondsSinceEpoch(modifiedMs);
+    }
+    try {
+      final file = File(item.encryptedPath);
+      if (file.existsSync()) return file.statSync().modified;
+    } catch (_) {}
+  }
+  return _dateOf(item) ?? DateTime.fromMillisecondsSinceEpoch(0);
+}
+
+String _exifValue(Map<String, IfdTag> tags, String key) {
+  final value = tags[key]?.printable.trim();
+  if (value == null || value.isEmpty || value == '0' || value == 'Unknown') return '';
+  return value;
+}
+
+DateTime? _parseExifDate(String value) {
+  // EXIF normally stores dates as yyyy:MM:dd HH:mm:ss.
+  final match = RegExp(r'^(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})').firstMatch(value.trim());
+  if (match != null) {
+    return DateTime.tryParse('${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:${match[6]}');
+  }
+  return DateTime.tryParse(value);
 }
 
 String _fmtSize(int b) {
@@ -169,31 +203,80 @@ String _fmtSize(int b) {
 Future<Map<String, String>> _loadMeta(VaultItem item) async {
   final f = File(item.encryptedPath);
   final out = <String, String>{};
-  
-  out['Name'] = item.originalName ?? item.encryptedPath.split(RegExp(r'[\\/]')).last;
-  
-  // 👈 1. అసలైన డేట్ డేటాబేస్ నుండే తీసుకుంటున్నాం
-  final added = _dateOf(item);
-  out['Date Taken'] = added == null ? '-' : DateFormat('EEE, d MMM yyyy • h:mm a').format(added);
-  
+  final storedName = item.originalName?.toString() ?? '';
+  final name = storedName.isNotEmpty
+      ? storedName
+      : item.encryptedPath.split(RegExp(r'[\\/]')).last;
+  out['Name'] = name;
   out['Album'] = item.albumName;
+
+  DateTime? captureDate;
+  Map<String, IfdTag> exifTags = {};
+
   if (await f.exists()) {
-    final st = await f.stat();
-    // 👈 'Modified' డేట్ ని తీసేసాం, ఎందుకంటే అది కాపీ అయిన డేట్ చూపిస్తుంది.
-    out['Size'] = _fmtSize(st.size);
-    final ext = out['Name']!.contains('.') ? out['Name']!.split('.').last.toUpperCase() : '-';
-    out['Type'] = ext;
-    if (item.type != 'audio') {
-      try {
-        final buf = await ui.ImmutableBuffer.fromUint8List(await f.readAsBytes());
-        final d = await ui.ImageDescriptor.encoded(buf);
-        out['Resolution'] = '${d.width} × ${d.height}  (${((d.width * d.height) / 1e6).toStringAsFixed(1)} MP)';
-        d.dispose(); buf.dispose();
-      } catch (_) {}
+    try {
+      final bytes = await f.readAsBytes();
+      if (item.type != 'audio') {
+        try {
+          exifTags = await readExifFromBytes(bytes);
+        } catch (_) {
+          exifTags = {};
+        }
+      }
+
+      // EXIF capture time has priority over the database fallback.
+      for (final key in ['EXIF DateTimeOriginal', 'EXIF DateTimeDigitized', 'Image DateTime']) {
+        final raw = _exifValue(exifTags, key);
+        if (raw.isNotEmpty) {
+          captureDate = _parseExifDate(raw);
+          if (captureDate != null) break;
+        }
+      }
+
+      final stat = await f.stat();
+      out['Size'] = _fmtSize(stat.size);
+      out['File Modified'] = DateFormat('EEE, d MMM yyyy • h:mm a').format(stat.modified);
+      final ext = name.contains('.') ? name.split('.').last.toUpperCase() : '-';
+      out['Type'] = ext;
+
+      if (item.type != 'audio') {
+        try {
+          final buf = await ui.ImmutableBuffer.fromUint8List(bytes);
+          final d = await ui.ImageDescriptor.encoded(buf);
+          out['Resolution'] = '${d.width} × ${d.height} (${((d.width * d.height) / 1e6).toStringAsFixed(1)} MP)';
+          d.dispose();
+          buf.dispose();
+        } catch (_) {}
+      }
+    } catch (_) {
+      out['Size'] = 'Unable to read file';
     }
   } else {
     out['Size'] = 'File missing';
   }
+
+  captureDate ??= _dateOf(item);
+  out['Date Taken'] = captureDate == null
+      ? 'Not available'
+      : DateFormat('EEE, d MMM yyyy • h:mm:ss a').format(captureDate);
+
+  // Show useful camera EXIF fields when present. Missing fields are omitted.
+  final exifFields = <String, String>{
+    'Camera Make': _exifValue(exifTags, 'Image Make'),
+    'Camera Model': _exifValue(exifTags, 'Image Model'),
+    'Lens Model': _exifValue(exifTags, 'EXIF LensModel'),
+    'Exposure Time': _exifValue(exifTags, 'EXIF ExposureTime'),
+    'Aperture': _exifValue(exifTags, 'EXIF FNumber'),
+    'ISO': _exifValue(exifTags, 'EXIF ISOSpeedRatings'),
+    'Focal Length': _exifValue(exifTags, 'EXIF FocalLength'),
+    'Flash': _exifValue(exifTags, 'EXIF Flash'),
+    'Orientation': _exifValue(exifTags, 'Image Orientation'),
+    'Software': _exifValue(exifTags, 'Image Software'),
+  };
+  for (final entry in exifFields.entries) {
+    if (entry.value.isNotEmpty) out[entry.key] = entry.value;
+  }
+
   out['Path'] = item.encryptedPath;
   return out;
 }
@@ -269,19 +352,17 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
       albumItems = albumItems.where((i) => i.type == _filterType).toList();
     }
 
-    // 👈 2. సార్టింగ్ మొత్తం డేటాబేస్ లో సేవ్ అయిన ఒరిజినల్ డేట్ బట్టే జరగాలి
+    // Created Date uses capture timestamp (takenMs / EXIF-derived date fallback).
+    // Modified Date uses saved modifiedMs, falling back to the file's modified time.
     albumItems.sort((a, b) {
-      if (_sortType == 0 || _sortType == 1) { 
-        final dA = DateTime.tryParse(a.addedDate) ?? DateTime.fromMillisecondsSinceEpoch(0);
-        final dB = DateTime.tryParse(b.addedDate) ?? DateTime.fromMillisecondsSinceEpoch(0);
-        return dB.compareTo(dA);
-      } else {
-        final fA = File(a.encryptedPath);
-        final fB = File(b.encryptedPath);
-        final sA = fA.existsSync() ? fA.statSync().size : 0;
-        final sB = fB.existsSync() ? fB.statSync().size : 0;
-        return sB.compareTo(sA);
+      if (_sortType == 0 || _sortType == 1) {
+        return _effectiveSortDate(b, _sortType).compareTo(_effectiveSortDate(a, _sortType));
       }
+      final fA = File(a.encryptedPath);
+      final fB = File(b.encryptedPath);
+      final sA = fA.existsSync() ? fA.statSync().size : 0;
+      final sB = fB.existsSync() ? fB.statSync().size : 0;
+      return sB.compareTo(sA);
     });
 
     if (mounted) {
@@ -295,10 +376,8 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
 
   void _groupItems() {
     _groupedItems = groupBy(_items, (VaultItem item) {
-      DateTime date = DateTime.now();
-      // 👈 3. గ్రూపింగ్ కూడా ఒరిజినల్ డేట్ బట్టే జరగాలి!
-      try { date = DateTime.tryParse(item.addedDate) ?? DateTime.now(); } catch (_) {}
-      
+      final date = _effectiveSortDate(item, _sortType);
+
       if (_sortType == 2) {
         final f = File(item.encryptedPath);
         final size = f.existsSync() ? f.statSync().size : 0;
@@ -589,11 +668,37 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
         backgroundColor: p.bg,
         body: Stack(
           children: [
+            Positioned(
+              top: -90, right: -80,
+              child: IgnorePointer(
+                child: Container(
+                  width: 240, height: 240,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: RadialGradient(colors: [p.accent.withOpacity(0.12), p.accent.withOpacity(0.0)]),
+                  ),
+                ),
+              ),
+            ),
             Positioned.fill(
               child: _loading
                   ? Center(child: CircularProgressIndicator(color: p.accent))
                   : _items.isEmpty
-                      ? Center(child: Text('Album is empty', style: TextStyle(color: p.sub, fontSize: 16)))
+                      ? Center(
+                          child: Padding(
+                            padding: const EdgeInsets.all(28),
+                            child: Column(mainAxisSize: MainAxisSize.min, children: [
+                              Container(width: 92, height: 92,
+                                decoration: BoxDecoration(shape: BoxShape.circle, color: p.glass, border: Border.all(color: p.border)),
+                                child: Icon(Icons.photo_library_outlined, size: 42, color: p.accent)),
+                              const SizedBox(height: 18),
+                              Text('Nothing here yet', style: TextStyle(color: p.text, fontSize: 19, fontWeight: FontWeight.w800)),
+                              const SizedBox(height: 7),
+                              Text('Photos and videos in this album will appear here.', textAlign: TextAlign.center,
+                                style: TextStyle(color: p.sub, fontSize: 13, height: 1.45)),
+                            ]),
+                          ),
+                        )
                       : CustomScrollView(
                           physics: const BouncingScrollPhysics(),
                           slivers: [
@@ -601,19 +706,29 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
                             ..._groupedItems.entries.expand((entry) {
                               final dateHeader = entry.key;
                               final itemsInGroup = entry.value;
+                              final width = mq.size.width;
+                              final columns = width >= 1100 ? 6 : width >= 850 ? 5 : width >= 600 ? 4 : 3;
 
                               return [
                                 SliverToBoxAdapter(
                                   child: Padding(
-                                    padding: const EdgeInsets.only(left: 16, right: 16, top: 16, bottom: 8),
-                                    child: Text(dateHeader, style: TextStyle(color: p.text, fontSize: 15, fontWeight: FontWeight.bold)),
+                                    padding: const EdgeInsets.fromLTRB(16, 18, 16, 10),
+                                    child: Row(children: [
+                                      Container(width: 4, height: 18, decoration: BoxDecoration(color: p.accent, borderRadius: BorderRadius.circular(8))),
+                                      const SizedBox(width: 10),
+                                      Text(dateHeader, style: TextStyle(color: p.text, fontSize: 14, fontWeight: FontWeight.w800, letterSpacing: 0.2)),
+                                      const SizedBox(width: 8),
+                                      Expanded(child: Container(height: 1, color: p.border.withOpacity(0.7))),
+                                      const SizedBox(width: 8),
+                                      Text('${itemsInGroup.length}', style: TextStyle(color: p.sub, fontSize: 12, fontWeight: FontWeight.w700)),
+                                    ]),
                                   ),
                                 ),
                                 SliverPadding(
-                                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                                  padding: const EdgeInsets.symmetric(horizontal: 8),
                                   sliver: SliverGrid(
-                                    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                                      crossAxisCount: 3, crossAxisSpacing: 3, mainAxisSpacing: 3
+                                    gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                                      crossAxisCount: columns, crossAxisSpacing: 6, mainAxisSpacing: 6,
                                     ),
                                     delegate: SliverChildBuilderDelegate(
                                       (context, index) {
@@ -628,11 +743,25 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
 
                                         // 👈 5. Updated Tile Rendering for Audio
                                         final framed = DecoratedBox(
-                                          decoration: BoxDecoration(color: p.glass, borderRadius: BorderRadius.circular(11), border: Border.all(color: p.border)),
+                                          decoration: BoxDecoration(
+                                            gradient: LinearGradient(
+                                              begin: Alignment.topLeft,
+                                              end: Alignment.bottomRight,
+                                              colors: [p.glass, p.surface.withOpacity(0.92)],
+                                            ),
+                                            borderRadius: BorderRadius.circular(16),
+                                            border: Border.all(
+                                              color: sel ? p.accent.withOpacity(0.95) : p.border.withOpacity(0.9),
+                                              width: sel ? 2 : 1,
+                                            ),
+                                            boxShadow: [
+                                              BoxShadow(color: Colors.black.withOpacity(0.10), blurRadius: 10, offset: const Offset(0, 4)),
+                                            ],
+                                          ),
                                           child: Padding(
-                                            padding: const EdgeInsets.all(1.5),
+                                            padding: const EdgeInsets.all(2),
                                             child: ClipRRect(
-                                              borderRadius: BorderRadius.circular(9.5),
+                                              borderRadius: BorderRadius.circular(13),
                                               child: Stack(fit: StackFit.expand, children: [
                                                 
                                                 isAudio 
@@ -757,7 +886,10 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
                                 children: [
                                   const SizedBox(width: 8),
                                   IconButton(icon: Icon(Icons.arrow_back_ios_new_rounded, color: p.text, size: 20), onPressed: () => Navigator.pop(context)),
-                                  Expanded(child: Text(widget.albumName, style: TextStyle(color: p.text, fontSize: 20, fontWeight: FontWeight.bold))),
+                                  Expanded(
+                                    child: Text(widget.albumName, maxLines: 1, overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(color: p.text, fontSize: 19, fontWeight: FontWeight.w800, letterSpacing: -0.25)),
+                                  ),
                                   
                                   // 👈 Import Audio Button
                                   IconButton(
