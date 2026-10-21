@@ -11,6 +11,7 @@ import 'package:photo_manager_image_provider/photo_manager_image_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:provider/provider.dart';
+import 'package:image_cropper/image_cropper.dart';
 import '../core/vault_service.dart';
 import '../core/theme_provider.dart';
 import '../core/taken_store.dart'; // 👈 1. TakenStore ని ఇంపోర్ట్ చేశాం
@@ -770,23 +771,209 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
   }
 
   Future<void> _openPreview(int idx) async {
-    final asset = _items[idx];
-    if (asset.type == AssetType.video) {
-      final f = await asset.originFile;
-      if (f == null || !mounted) return;
-      await Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => VideoPlayerScreen(file: f, title: asset.title)));
-    } else {
-      final imgs = _items.where((e) => e.type != AssetType.video).toList();
-      final start = imgs.indexWhere((e) => e.id == asset.id);
-      final px = _layout?.thumbPx ?? 250;
-      await Navigator.of(context).push(PageRouteBuilder<void>(
-        opaque: false,
-        transitionDuration: const Duration(milliseconds: 420),
-        reverseTransitionDuration: const Duration(milliseconds: 320),
-        pageBuilder: (_, __, ___) => HomePreviewScreen(items: imgs, initial: start < 0 ? 0 : start, thumbPx: px),
-        transitionsBuilder: (_, a, __, child) => FadeTransition(opacity: CurvedAnimation(parent: a, curve: Curves.easeOutCubic), child: child),
-      ));
+    final items = _items.map(_toPreviewItem).toList();
+    final title = (_album == null || _album!.isAll) ? 'All photos' : _album!.name;
+
+    final changed = await Navigator.of(context).push<bool>(PageRouteBuilder<bool>(
+      opaque: false,
+      transitionDuration: const Duration(milliseconds: 420),
+      reverseTransitionDuration: const Duration(milliseconds: 320),
+      pageBuilder: (_, __, ___) => UniversalPreviewScreen(
+        items: items,
+        initialIndex: idx,
+        headerLabel: title,
+        actions: _previewActions(_pal),
+      ),
+      transitionsBuilder: (_, a, __, child) => FadeTransition(
+        opacity: CurvedAnimation(parent: a, curve: Curves.easeOutCubic),
+        child: child,
+      ),
+    ));
+
+    if (changed == true && mounted) _reload();
+  }
+
+  PreviewItem _toPreviewItem(AssetEntity a) {
+    final isVideo = a.type == AssetType.video;
+    final d = TakenStore.instance.dateOf(a);
+    return PreviewItem(
+      id: a.id,
+      isVideo: isVideo,
+      imageBuilder: () => AssetEntityImageProvider(
+        a,
+        isOriginal: !isVideo,
+        thumbnailSize: const ThumbnailSize(1080, 1080),
+        thumbnailFormat: ThumbnailFormat.jpeg,
+      ),
+      heroTag: isVideo ? 'vid_${a.id}' : 'photo_${a.id}',
+      title: a.title,
+      details: {
+        'Type': isVideo ? 'Video' : 'Photo',
+        'Date': DateFormat('d MMM yyyy, h:mm a').format(d),
+        'Resolution': '${a.width} × ${a.height}',
+        if (isVideo) 'Duration': '${a.videoDuration.inSeconds} sec',
+      },
+      onPlay: (ctx) async {
+        final f = await a.originFile;
+        if (f == null || !ctx.mounted) return;
+        Navigator.push(
+          ctx,
+          MaterialPageRoute(
+            builder: (_) => VideoPlayerScreen(file: f, title: a.title),
+          ),
+        );
+      },
+      data: a,
+    );
+  }
+
+  List<PreviewAction> _previewActions(_P p) {
+    return [
+      // ── Dock ──
+      PreviewAction(
+        icon: Icons.ios_share_rounded,
+        label: 'Share',
+        color: p.accent,
+        removesItem: false,
+        run: (i) async {
+          final f = await (i.data as AssetEntity).originFile;
+          if (f == null) throw const PreviewCancelled();
+          await Share.shareXFiles([XFile(f.path)]);
+        },
+      ),
+      PreviewAction(
+        icon: Icons.drive_file_move_rounded,
+        label: 'Move',
+        color: p.accent,
+        run: (i) => _pvMove(i.data as AssetEntity),
+      ),
+      PreviewAction(
+        icon: Icons.delete_outline_rounded,
+        label: 'Delete',
+        color: Colors.redAccent,
+        confirmTitle: 'Move to Vault Bin?',
+        confirmMessage: 'Photo gallery nundi remove ayyi Vault Bin ki veltundi.',
+        run: (i) => _pvBin(i.data as AssetEntity),
+      ),
+
+      // ── More sheet ──
+      PreviewAction(
+        icon: Icons.copy_rounded,
+        label: 'Copy',
+        color: const Color(0xFF7CE0B0),
+        inDock: false,
+        removesItem: false,
+        run: (i) => _pvCopy(i.data as AssetEntity),
+      ),
+      PreviewAction(
+        icon: Icons.crop_rotate_rounded,
+        label: 'Crop/Rotate',
+        color: const Color(0xFFFFC857),
+        inDock: false,
+        removesItem: false,
+        run: (i) => _pvCropRotate(i.data as AssetEntity),
+      ),
+    ];
+  }
+
+  void _snack(String m) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
+  }
+
+  Future<void> _pvMove(AssetEntity a) async {
+    final target = await _showAlbumPicker('Move to Vault');
+    if (target == null || !mounted) throw const PreviewCancelled();
+
+    _showProgressDialog('Moving...', 1, ValueNotifier<int>(1));
+    var ok = false;
+    try {
+      final existing = await DatabaseHelper.instance.fetchAll();
+      final isDup = existing.any((e) =>
+          e.originalName == a.title && e.albumName == target && e.isDeleted == 0);
+      ok = isDup || await VaultService().hideAsset(a, target);
+      if (ok) {
+        final del = await PhotoManager.editor.deleteWithIds([a.id]);
+        ok = del.isNotEmpty;
+      }
+    } finally {
+      if (mounted) Navigator.pop(context);
     }
+    if (!ok) throw const PreviewCancelled();
+    _snack('Moved to $target 🔒');
+  }
+
+  Future<void> _pvCopy(AssetEntity a) async {
+    final target = await _showAlbumPicker('Copy to Vault');
+    if (target == null || !mounted) throw const PreviewCancelled();
+
+    _showProgressDialog('Copying...', 1, ValueNotifier<int>(1));
+    var ok = false;
+    var dup = false;
+    try {
+      final existing = await DatabaseHelper.instance.fetchAll();
+      dup = existing.any((e) =>
+          e.originalName == a.title && e.albumName == target && e.isDeleted == 0);
+      ok = dup || await VaultService().hideAsset(a, target);
+    } finally {
+      if (mounted) Navigator.pop(context);
+    }
+    if (!ok) throw const PreviewCancelled();
+    _snack(dup ? 'Already in $target (skipped)' : 'Copied to $target 📄');
+  }
+
+  Future<void> _pvBin(AssetEntity a) async {
+    _showProgressDialog('Deleting...', 1, ValueNotifier<int>(1));
+    var ok = false;
+    try {
+      final existing = await DatabaseHelper.instance.fetchAll();
+      final isDup = existing.any((e) =>
+          e.originalName == a.title && e.albumName == 'My_Photos' && e.isDeleted == 1);
+      ok = isDup || await VaultService().hideAsset(a, 'My_Photos', trash: true);
+      if (ok) {
+        final del = await PhotoManager.editor.deleteWithIds([a.id]);
+        ok = del.isNotEmpty;
+      }
+    } finally {
+      if (mounted) Navigator.pop(context);
+    }
+    if (!ok) throw const PreviewCancelled();
+    _snack('Moved to Vault Bin 🗑️');
+  }
+
+  /// Device gallery originals ni overwrite cheyyakunda, edit ni NEW COPY ga save chestundi.
+  Future<void> _pvCropRotate(AssetEntity a) async {
+    if (a.type == AssetType.video) {
+      _snack('Videos ki crop ledu');
+      throw const PreviewCancelled();
+    }
+    final f = await a.originFile;
+    if (f == null) throw const PreviewCancelled();
+
+    final cropped = await ImageCropper().cropImage(
+      sourcePath: f.path,
+      compressFormat: ImageCompressFormat.jpg,
+      compressQuality: 95,
+      uiSettings: [
+        AndroidUiSettings(
+          toolbarTitle: 'Crop & Rotate',
+          toolbarColor: const Color(0xFF101116),
+          toolbarWidgetColor: Colors.white,
+          backgroundColor: Colors.black,
+          activeControlsWidgetColor: _pal.accent,
+          initAspectRatio: CropAspectRatioPreset.original,
+          lockAspectRatio: false,
+        ),
+        IOSUiSettings(title: 'Crop & Rotate'),
+      ],
+    );
+    if (cropped == null) throw const PreviewCancelled();
+
+    await PhotoManager.editor.saveImageWithPath(
+      cropped.path,
+      title: 'edit_${DateTime.now().millisecondsSinceEpoch}.jpg',
+    );
+    _snack('Saved as a new copy ✂️');
   }
 
   void _switchAlbum(String id) {

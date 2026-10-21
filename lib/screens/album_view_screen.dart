@@ -19,6 +19,7 @@ import '../db/database_helper.dart';
 import '../db/vault_item_model.dart';
 import 'video_player_screen.dart'; 
 import 'audio_player_screen.dart'; // 👈 3. Added Audio Player
+import 'photo_preview_screen.dart';
 
 // ════════════════════════════════════════════════════════════════════
 //  GLASS WIDGET & SHARED BUTTON
@@ -625,6 +626,78 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
     );
   }
   
+  Future<void> _openPreview(VaultItem item) async {
+    final p = context.read<ThemeProvider>().p;
+    // audios ni swipe list nundi exclude chestunnam
+    final media = _items.where((e) => e.type != 'audio').toList();
+    final idx = media.indexWhere((e) => e.id == item.id);
+    if (idx == -1) return;
+
+    final changed = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute<bool>(
+        builder: (_) => UniversalPreviewScreen(
+          items: media
+              .map((v) => PreviewItem.fromVault(v, detailsLoader: () => _loadMeta(v)))
+              .toList(),
+          initialIndex: idx,
+          headerLabel: widget.albumName,
+          actions: [
+            ...PreviewActions.vault(), // Export, Bin, Crop/Rotate, Share
+            _copyAction(p),
+            _moveAction(p),
+          ],
+        ),
+      ),
+    );
+    if (changed == true) _loadItems();
+  }
+
+  PreviewAction _copyAction(AppPalette p) => PreviewAction(
+        icon: Icons.copy_rounded,
+        label: 'Copy to',
+        color: const Color(0xFF7CE0B0),
+        inDock: false,
+        removesItem: false,
+        run: (i) async {
+          final v = i.data as VaultItem;
+          final target = await _pickAlbum(context, 'Copy to', p);
+          if (target == null || !mounted) throw const PreviewCancelled();
+
+          final db = await DatabaseHelper.instance.database; // ✅ await fix
+          final ok = await _withProgress(context, () => _copyItem(db, v, target));
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(ok ? 'Copied to $target ✅' : 'Copy failed ❌')),
+          );
+        },
+      );
+
+  PreviewAction _moveAction(AppPalette p) => PreviewAction(
+        icon: Icons.drive_file_move_rounded,
+        label: 'Move to',
+        color: const Color(0xFFB892FF),
+        inDock: false,
+        // removesItem default true: move tarvata item ee album lo undadu
+        run: (i) async {
+          final v = i.data as VaultItem;
+          final target =
+              await _pickAlbum(context, 'Move to', p, exclude: widget.albumName);
+          if (target == null || !mounted) throw const PreviewCancelled();
+
+          final db = await DatabaseHelper.instance.database;
+          await _withProgress(
+            context,
+            () => db.update('vault_items', {'albumName': target},
+                where: 'id = ?', whereArgs: [v.id]),
+          );
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Moved to $target 🚀')),
+          );
+        },
+      );
+
   Future<void> _restoreToGallery() async {
     final chosen = _items.where((i) => _selected.contains(i.id)).toList();
     if (chosen.isEmpty) return;
@@ -833,13 +906,7 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
                                               if (isAudio) {
                                                 await Navigator.push(context, MaterialPageRoute(builder: (_) => AudioPlayerScreen(file: File(item.encryptedPath), title: item.originalName ?? 'Audio')));
                                               } else {
-                                                // Exclude audios for Photo Gallery Swiping to avoid crash
-                                                final imgItems = _items.where((e) => e.type != 'audio').toList();
-                                                final idx = imgItems.indexWhere((e) => e.id == item.id);
-                                                if (idx != -1) {
-                                                  final changed = await Navigator.push(context, MaterialPageRoute(builder: (_) => PhotoPreviewScreen(items: imgItems, initialIndex: idx, albumName: widget.albumName)));
-                                                  if (changed == true) _loadItems();
-                                                }
+                                                await _openPreview(item);
                                               }
                                             }
                                           },
@@ -972,179 +1039,6 @@ class _AlbumViewScreenState extends State<AlbumViewScreen> {
             ),
           ],
         ),
-      ),
-    );
-  }
-}
-
-// ════════════════════════════════════════════════════════════════════
-//  2. PHOTO PREVIEW SCREEN (Vault Image Viewer)
-// ════════════════════════════════════════════════════════════════════
-class PhotoPreviewScreen extends StatefulWidget {
-  final List<VaultItem> items;
-  final int initialIndex;
-  final bool trash;
-  final String? albumName; 
-  const PhotoPreviewScreen({
-    super.key, required this.items, required this.initialIndex, this.trash = false, this.albumName,
-  });
-  @override
-  State<PhotoPreviewScreen> createState() => _PhotoPreviewScreenState();
-}
-
-class _PhotoPreviewScreenState extends State<PhotoPreviewScreen> {
-  late final PageController _pc = PageController(initialPage: widget.initialIndex);
-  late int _index = widget.initialIndex;
-  bool _chrome = true;
-
-  VaultItem get _cur => widget.items[_index];
-
-  Future<void> _act(Future<void> Function() fn) async {
-    await fn();
-    if (mounted) Navigator.pop(context, true);
-  }
-
-  Future<void> _showPreviewActions(AppPalette p) async {
-    final act = await showModalBottomSheet<String>(
-      context: context, backgroundColor: p.surface,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
-      builder: (_) => SafeArea(
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          const SizedBox(height: 12),
-          ListTile(leading: Icon(Icons.ios_share_rounded, color: p.accent), title: Text('Share', style: TextStyle(color: p.text)), onTap: () => Navigator.pop(context, 'share')),
-          ListTile(leading: Icon(Icons.copy_rounded, color: p.accent), title: Text('Copy to Album', style: TextStyle(color: p.text)), onTap: () => Navigator.pop(context, 'copy')),
-          ListTile(leading: Icon(Icons.drive_file_move_rounded, color: p.accent), title: Text('Move to Album', style: TextStyle(color: p.text)), onTap: () => Navigator.pop(context, 'move')),
-          const SizedBox(height: 12),
-        ]),
-      ),
-    );
-
-    if (act == 'share' && mounted) {
-      if (File(_cur.encryptedPath).existsSync()) await Share.shareXFiles([XFile(_cur.encryptedPath)]);
-    } else if (act == 'copy' && mounted) {
-      final target = await _pickAlbum(context, 'Copy to', p);
-      if (target != null) {
-        await _withProgress(context, () => _copyItem(DatabaseHelper.instance.database, _cur, target));
-        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Copied to $target ✅')));
-      }
-    } else if (act == 'move' && mounted) {
-      final target = await _pickAlbum(context, 'Move to', p, exclude: widget.albumName ?? _cur.albumName);
-      if (target != null) {
-        final db = await DatabaseHelper.instance.database;
-        await _withProgress(context, () => db.update('vault_items', {'albumName': target}, where: 'id = ?', whereArgs: [_cur.id]));
-        if (mounted) Navigator.pop(context, true); 
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final mq = MediaQuery.of(context);
-    final p = context.watch<ThemeProvider>().p;
-
-    return Scaffold(
-      backgroundColor: p.bg, 
-      extendBodyBehindAppBar: true,
-      extendBody: true,
-      body: Stack(
-        fit: StackFit.expand,
-        children: [
-          GestureDetector(
-            onTap: () => setState(() => _chrome = !_chrome),
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                PhotoViewGallery.builder(
-                  pageController: _pc,
-                  itemCount: widget.items.length,
-                  onPageChanged: (i) => setState(() => _index = i),
-                  backgroundDecoration: BoxDecoration(color: p.bg), 
-                  builder: (_, i) {
-                    final item = widget.items[i];
-                    final isVideo = item.type == 'video';
-                    final imgPath = (isVideo && item.thumbnailPath != null) ? item.thumbnailPath! : item.encryptedPath;
-                    
-                    return PhotoViewGalleryPageOptions(
-                      imageProvider: FileImage(File(imgPath)),
-                      heroAttributes: PhotoViewHeroAttributes(tag: 'vault_${item.id}'),
-                      minScale: PhotoViewComputedScale.contained,
-                      maxScale: PhotoViewComputedScale.covered * 3,
-                    );
-                  },
-                ),
-                
-                if (_cur.type == 'video')
-                  Center(
-                    child: GestureDetector(
-                      onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => VideoPlayerScreen(file: File(_cur.encryptedPath), title: _cur.originalName))),
-                      child: const Icon(Icons.play_circle_fill_rounded, color: Colors.white, size: 80, shadows: [Shadow(color: Colors.black54, blurRadius: 10)]),
-                    ),
-                  ),
-              ],
-            ),
-          ),
-
-          // Top Theme Glass Bar
-          Positioned(
-            top: 0, left: 0, right: 0,
-            child: AnimatedOpacity(
-              duration: const Duration(milliseconds: 200), opacity: _chrome ? 1.0 : 0.0,
-              child: IgnorePointer(
-                ignoring: !_chrome,
-                child: _Glass(
-                  p: p, radius: 0, blur: 25, color: p.bar, 
-                  border: Border(bottom: BorderSide(color: p.border)),
-                  child: Padding(
-                    padding: EdgeInsets.only(top: mq.padding.top),
-                    child: SizedBox(
-                      height: 56,
-                      child: Row(
-                        children: [
-                          IconButton(icon: Icon(Icons.arrow_back_ios_new_rounded, color: p.text, size: 20), onPressed: () => Navigator.pop(context)),
-                          Expanded(child: Text('${_index + 1} / ${widget.items.length}', style: TextStyle(color: p.text, fontSize: 18, fontWeight: FontWeight.bold))),
-                          IconButton(tooltip: 'Details', icon: Icon(Icons.info_outline_rounded, color: p.text), onPressed: () => _showMeta(context, p, _cur)),
-                          if (!widget.trash) IconButton(tooltip: 'More', icon: Icon(Icons.more_vert_rounded, color: p.text), onPressed: () => _showPreviewActions(p)),
-                          const SizedBox(width: 4),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-
-          // Bottom Theme Glass Bar
-          Positioned(
-            bottom: 0, left: 0, right: 0,
-            child: AnimatedOpacity(
-              duration: const Duration(milliseconds: 200), opacity: _chrome ? 1.0 : 0.0,
-              child: IgnorePointer(
-                ignoring: !_chrome,
-                child: _Glass(
-                  p: p, radius: 0, blur: 25, color: p.bar,
-                  border: Border(top: BorderSide(color: p.border)),
-                  child: Padding(
-                    padding: EdgeInsets.only(bottom: mq.padding.bottom, top: 12),
-                    child: SizedBox(
-                      height: 70,
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                        children: widget.trash ? [
-                          _ActionBtn(icon: Icons.restore_rounded, label: 'Restore', color: p.accent, onTap: () => _act(() => DatabaseHelper.instance.setDeleted([_cur.id!], false))),
-                          _ActionBtn(icon: Icons.delete_forever_rounded, label: 'Delete', color: Colors.redAccent, onTap: () => _act(() => VaultService().deleteForever([_cur]))),
-                        ] : [
-                          _ActionBtn(icon: Icons.output_rounded, label: 'Export', color: p.accent, onTap: () => _act(() => VaultService().exportToGallery([_cur]))),
-                          _ActionBtn(icon: Icons.delete_outline_rounded, label: 'Trash', color: Colors.redAccent, onTap: () => _act(() => DatabaseHelper.instance.setDeleted([_cur.id!], true))),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ],
       ),
     );
   }
