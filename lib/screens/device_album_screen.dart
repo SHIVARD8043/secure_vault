@@ -1,7 +1,10 @@
 import 'dart:io';
 import 'dart:ui' show ImageFilter, lerpDouble;
+import 'package:exif/exif.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:image_cropper/image_cropper.dart';
+import 'package:intl/intl.dart';
 import 'package:photo_manager/photo_manager.dart';
 import 'package:photo_manager_image_provider/photo_manager_image_provider.dart';
 import 'package:provider/provider.dart';
@@ -9,7 +12,7 @@ import 'package:share_plus/share_plus.dart';
 import '../core/theme_provider.dart';
 import '../core/vault_service.dart';
 import '../db/database_helper.dart';
-import 'home_preview_screen.dart';
+import 'photo_preview_screen.dart';
 import 'video_player_screen.dart';
 
 // ════════════════════════════════════════════════════════════════════
@@ -146,19 +149,10 @@ class _DeviceAlbumScreenState extends State<DeviceAlbumScreen> {
         end: count,
       );
 
-      // Best fallback: sort using the date reported by Android/gallery.
       // Newest photos/videos first.
       assets.sort((a, b) {
-        final aDate = a.createDateTime;
-        final bDate = b.createDateTime;
-
-        final dateCompare = bDate.compareTo(aDate);
-
-        // Stable fallback when dates are identical.
-        if (dateCompare == 0) {
-          return b.id.compareTo(a.id);
-        }
-
+        final dateCompare = b.createDateTime.compareTo(a.createDateTime);
+        if (dateCompare == 0) return b.id.compareTo(a.id);
         return dateCompare;
       });
 
@@ -180,10 +174,30 @@ class _DeviceAlbumScreenState extends State<DeviceAlbumScreen> {
       });
     }
   }
+
   void _toggle(AssetEntity a) {
     setState(() {
       _selected.contains(a.id) ? _selected.remove(a.id) : _selected.add(a.id);
     });
+  }
+
+  void _snack(String m) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
+  }
+
+  /// Single-item operations kosam simple spinner.
+  Future<T> _busy<T>(Future<T> Function() job) async {
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(child: CircularProgressIndicator()),
+    );
+    try {
+      return await job();
+    } finally {
+      if (mounted) Navigator.of(context).pop();
+    }
   }
 
   // ── ALBUM INFO POPUP ──
@@ -248,7 +262,7 @@ class _DeviceAlbumScreenState extends State<DeviceAlbumScreen> {
   Future<AssetPathEntity?> _showLocalAlbumPicker(AppPalette p, String title) async {
     final albums = await PhotoManager.getAssetPathList(type: RequestType.image | RequestType.video);
     final validAlbums = albums.where((a) => a.id != widget.album.id && !a.isAll).toList();
-    
+
     if (!mounted) return null;
     return showDialog<AssetPathEntity>(
       context: context,
@@ -296,7 +310,6 @@ class _DeviceAlbumScreenState extends State<DeviceAlbumScreen> {
       ),
     );
   }
-
 
   double _operationProgress = 0;
   String _operationLabel = 'Preparing...';
@@ -350,7 +363,7 @@ class _DeviceAlbumScreenState extends State<DeviceAlbumScreen> {
     }
   }
 
-  // ── ACTIONS ──
+  // ── BULK ACTIONS (grid selection) ──
   Future<void> _shareSelected() async {
     final chosen = _items.where((a) => _selected.contains(a.id)).toList();
     if (chosen.isEmpty) return;
@@ -369,10 +382,10 @@ class _DeviceAlbumScreenState extends State<DeviceAlbumScreen> {
     final chosen = _items.where((a) => _selected.contains(a.id)).toList();
     if (chosen.isEmpty) return;
     if (!await _showConfirmDialog(p, 'డిలీట్ చేయాలా?', 'ఈ ${chosen.length} ఐటెమ్స్ గ్యాలరీ నుండి డిలీట్ చేయబడతాయి.', 'Delete')) return;
-    
+
     showDialog(context: context, barrierDismissible: false, builder: (_) => const Center(child: CircularProgressIndicator()));
     await PhotoManager.editor.deleteWithIds(chosen.map((e) => e.id).toList());
-    
+
     if (mounted) {
       Navigator.pop(context);
       setState(() => _selected.clear());
@@ -474,24 +487,255 @@ class _DeviceAlbumScreenState extends State<DeviceAlbumScreen> {
     }
   }
 
+  // ════════════════════════════════════════════════════════════════
+  //  UNIVERSAL PREVIEW INTEGRATION
+  // ════════════════════════════════════════════════════════════════
   Future<void> _openPreview(int idx) async {
-    final asset = _items[idx];
-    if (asset.type == AssetType.video) {
-      final f = await asset.originFile;
-      if (f != null && mounted) await Navigator.of(context).push(MaterialPageRoute(builder: (_) => VideoPlayerScreen(file: f, title: asset.title)));
-    } else {
-      final imgs = _items.where((e) => e.type != AssetType.video).toList();
-      final start = imgs.indexWhere((e) => e.id == asset.id);
-      await Navigator.of(context).push(PageRouteBuilder<void>(
-        opaque: false,
-        transitionDuration: const Duration(milliseconds: 420),
-        reverseTransitionDuration: const Duration(milliseconds: 320),
-        pageBuilder: (_, __, ___) => HomePreviewScreen(items: imgs, initial: start < 0 ? 0 : start, thumbPx: 400),
-        transitionsBuilder: (_, a, __, child) => FadeTransition(opacity: CurvedAnimation(parent: a, curve: Curves.easeOutCubic), child: child),
-      ));
-    }
+    final p = context.read<ThemeProvider>().p;
+
+    final changed = await Navigator.of(context).push<bool>(PageRouteBuilder<bool>(
+      opaque: false,
+      transitionDuration: const Duration(milliseconds: 420),
+      reverseTransitionDuration: const Duration(milliseconds: 320),
+      pageBuilder: (_, __, ___) => UniversalPreviewScreen(
+        items: _items.map(_toPreviewItem).toList(),
+        initialIndex: idx,
+        headerLabel: widget.albumName,
+        actions: _previewActions(p),
+      ),
+      transitionsBuilder: (_, a, __, child) => FadeTransition(
+        opacity: CurvedAnimation(parent: a, curve: Curves.easeOutCubic),
+        child: child,
+      ),
+    ));
+
+    if (changed == true && mounted) _loadAlbumAssets();
   }
 
+  PreviewItem _toPreviewItem(AssetEntity a) {
+    final isVideo = a.type == AssetType.video;
+    return PreviewItem(
+      id: a.id,
+      isVideo: isVideo,
+      imageBuilder: () => AssetEntityImageProvider(
+        a,
+        isOriginal: false,
+        thumbnailSize: const ThumbnailSize(2048, 2048),
+        thumbnailFormat: ThumbnailFormat.jpeg,
+      ),
+      heroTag: 'photo_${a.id}', // grid Hero tag tho match avvali
+      title: a.title,
+      detailsLoader: () => _loadInfo(a),
+      onPlay: (ctx) async {
+        final f = await a.originFile;
+        if (f == null || !ctx.mounted) return;
+        Navigator.push(
+          ctx,
+          MaterialPageRoute(builder: (_) => VideoPlayerScreen(file: f, title: a.title)),
+        );
+      },
+      data: a,
+    );
+  }
+
+  List<PreviewAction> _previewActions(AppPalette p) {
+    return [
+      // ── Dock ──
+      PreviewAction(
+        icon: Icons.ios_share_rounded,
+        label: 'Share',
+        color: p.accent,
+        removesItem: false,
+        run: (i) async {
+          final f = await (i.data as AssetEntity).originFile;
+          if (f == null) throw const PreviewCancelled();
+          await Share.shareXFiles([XFile(f.path)]);
+        },
+      ),
+      PreviewAction(
+        icon: Icons.security_rounded,
+        label: 'Vault',
+        color: p.accent,
+        run: (i) => _pvToVault(p, i.data as AssetEntity),
+      ),
+      PreviewAction(
+        icon: Icons.delete_outline_rounded,
+        label: 'Delete',
+        color: Colors.redAccent,
+        confirmTitle: 'డిలీట్ చేయాలా?',
+        confirmMessage: 'ఈ ఐటెమ్ గ్యాలరీ నుండి డిలీట్ చేయబడుతుంది.',
+        run: (i) => _pvDelete(i.data as AssetEntity),
+      ),
+
+      // ── More sheet ──
+      PreviewAction(
+        icon: Icons.copy_rounded,
+        label: 'Copy to',
+        color: const Color(0xFF7CE0B0),
+        inDock: false,
+        removesItem: false,
+        run: (i) => _pvCopy(p, i.data as AssetEntity),
+      ),
+      PreviewAction(
+        icon: Icons.drive_file_move_rounded,
+        label: 'Move to',
+        color: const Color(0xFFB892FF),
+        inDock: false,
+        run: (i) => _pvMove(p, i.data as AssetEntity),
+      ),
+      PreviewAction(
+        icon: Icons.crop_rotate_rounded,
+        label: 'Crop/Rotate',
+        color: const Color(0xFFFFC857),
+        inDock: false,
+        removesItem: false,
+        run: (i) => _pvCropRotate(p, i.data as AssetEntity),
+      ),
+    ];
+  }
+
+  Future<void> _pvDelete(AssetEntity a) async {
+    final res = await _busy(() => PhotoManager.editor.deleteWithIds([a.id]));
+    if (res.isEmpty) throw const PreviewCancelled(); // user system dialog lo deny chesadu
+  }
+
+  Future<void> _pvToVault(AppPalette p, AssetEntity a) async {
+    final target = await _showVaultAlbumPicker(p, 'వాల్ట్ లోకి మార్చు (Vault)');
+    if (target == null || !mounted) throw const PreviewCancelled();
+
+    final ok = await _busy(() => VaultService().hideAsset(a, target));
+    if (!ok) {
+      _snack('Vault ki move avvaledu ❌');
+      throw const PreviewCancelled();
+    }
+    final del = await _busy(() => PhotoManager.editor.deleteWithIds([a.id]));
+    if (del.isEmpty) {
+      _snack('Vault lo save ayindi, kani original delete avvaledu');
+      throw const PreviewCancelled();
+    }
+    _snack('Moved to Vault 🔒');
+  }
+
+  Future<void> _pvCopy(AppPalette p, AssetEntity a) async {
+    final target = await _showLocalAlbumPicker(p, 'Copy to Album');
+    if (target == null || !mounted) throw const PreviewCancelled();
+
+    final n = await _busy(() => PhotoManager.editor.copyAssetToPath(asset: a, pathEntity: target));
+    if (n == null) {
+      _snack('Copy failed ❌');
+      throw const PreviewCancelled();
+    }
+    _snack('Copied to ${target.name} 📄');
+  }
+
+  Future<void> _pvMove(AppPalette p, AssetEntity a) async {
+    final target = await _showLocalAlbumPicker(p, 'Move to Album');
+    if (target == null || !mounted) throw const PreviewCancelled();
+
+    final n = await _busy(() => PhotoManager.editor.copyAssetToPath(asset: a, pathEntity: target));
+    if (n == null) {
+      _snack('Move failed ❌');
+      throw const PreviewCancelled();
+    }
+    final del = await _busy(() => PhotoManager.editor.deleteWithIds([a.id]));
+    if (del.isEmpty) {
+      _snack('Copied to ${target.name}, kani original delete avvaledu');
+      throw const PreviewCancelled();
+    }
+    _snack('Moved to ${target.name} 🚀');
+  }
+
+  /// Original overwrite cheyyadu: edited version new copy ga gallery lo save avtundi.
+  Future<void> _pvCropRotate(AppPalette p, AssetEntity a) async {
+    if (a.type == AssetType.video) {
+      _snack('Videos ki crop ledu');
+      throw const PreviewCancelled();
+    }
+    final f = await a.originFile;
+    if (f == null) throw const PreviewCancelled();
+
+    final cropped = await ImageCropper().cropImage(
+      sourcePath: f.path,
+      compressFormat: ImageCompressFormat.jpg,
+      compressQuality: 95,
+      uiSettings: [
+        AndroidUiSettings(
+          toolbarTitle: 'Crop & Rotate',
+          toolbarColor: const Color(0xFF101116),
+          toolbarWidgetColor: Colors.white,
+          backgroundColor: Colors.black,
+          activeControlsWidgetColor: p.accent,
+          initAspectRatio: CropAspectRatioPreset.original,
+          lockAspectRatio: false,
+        ),
+        IOSUiSettings(title: 'Crop & Rotate'),
+      ],
+    );
+    if (cropped == null) throw const PreviewCancelled();
+
+    await PhotoManager.editor.saveImageWithPath(
+      cropped.path,
+      title: 'edit_${DateTime.now().millisecondsSinceEpoch}.jpg',
+    );
+    _snack('Saved as a new copy ✂️');
+  }
+
+  // ── INFO (EXIF) ──
+  String _fmtSize(int b) {
+    if (b <= 0) return '-';
+    const u = ['B', 'KB', 'MB', 'GB'];
+    var v = b.toDouble(), i = 0;
+    while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+    return '${v.toStringAsFixed(i == 0 ? 0 : 1)} ${u[i]}';
+  }
+
+  String _tag(Map<String, IfdTag> t, String k) {
+    final v = t[k]?.printable.trim();
+    if (v == null || v.isEmpty || v == '0') return '';
+    return v;
+  }
+
+  Future<Map<String, String>> _loadInfo(AssetEntity a) async {
+    final isVideo = a.type == AssetType.video;
+    final fmt = DateFormat('EEE, d MMM yyyy • h:mm a');
+    final out = <String, String>{
+      'Name': a.title ?? '-',
+      'Album': widget.albumName,
+      'Type': isVideo ? 'Video' : 'Photo',
+      'Date': fmt.format(a.createDateTime),
+      'Modified': fmt.format(a.modifiedDateTime),
+      'Resolution': '${a.width} × ${a.height}',
+      if (isVideo) 'Duration': '${a.videoDuration.inSeconds} sec',
+    };
+
+    try {
+      final f = await a.originFile;
+      if (f != null && await f.exists()) {
+        out['Size'] = _fmtSize(await f.length());
+
+        if (!isVideo) {
+          final tags = await readExifFromBytes(await f.readAsBytes());
+          final exif = <String, String>{
+            'Camera': [_tag(tags, 'Image Make'), _tag(tags, 'Image Model')].where((s) => s.isNotEmpty).join(' '),
+            'Lens': _tag(tags, 'EXIF LensModel'),
+            'Exposure': _tag(tags, 'EXIF ExposureTime'),
+            'Aperture': _tag(tags, 'EXIF FNumber'),
+            'ISO': _tag(tags, 'EXIF ISOSpeedRatings'),
+            'Focal Length': _tag(tags, 'EXIF FocalLength'),
+            'Flash': _tag(tags, 'EXIF Flash'),
+          };
+          exif.forEach((k, v) { if (v.isNotEmpty) out[k] = v; });
+        }
+        out['Path'] = f.path;
+      }
+    } catch (_) {}
+
+    return out;
+  }
+
+  // ════════════════════════════════════════════════════════════════
+  //  BUILD
+  // ════════════════════════════════════════════════════════════════
   @override
   Widget build(BuildContext context) {
     final mq = MediaQuery.of(context);
@@ -542,7 +786,7 @@ class _DeviceAlbumScreenState extends State<DeviceAlbumScreen> {
                         },
                       ),
               ),
-              
+
               // ── TOP GLASS BAR ──
               Positioned(
                 top: 0, left: 0, right: 0,

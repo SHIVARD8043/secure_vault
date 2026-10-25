@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch: # GitHub యాక్షన్స్ ట్యాబ్ నుంచి మాన్యువల్ గా రన్ చేయడానికి
+  workflow_dispatch:
 
 jobs:
   build:
@@ -16,7 +16,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Java
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
           java-version: '17'
@@ -25,25 +25,25 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
+          cache: true
 
       - name: Install Dependencies
         run: flutter pub get
 
-      # 👈 1. గిట్‌హబ్ సీక్రెట్స్ నుండి బేస్64 టెక్స్ట్ ని డీకోడ్ చేసి jks ఫైల్ లాగా మారుస్తుంది
       - name: Decode Keystore
         run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/app/upload-keystore.jks
 
-      # 👈 2. కీస్టోర్ పాస్‌వర్డ్స్ ని పాస్ చేసి పక్కాగా సైన్డ్ రిలీజ్ APK ని బిల్డ్ చేస్తుంది
-      - name: Build Release APK
+      - name: Build Release APK (arm64)
         env:
           KEYSTORE_PATH: upload-keystore.jks
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: flutter build apk --release
+        run: flutter build apk --release --target-platform android-arm64
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: secure-vault-release-apk
           path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error

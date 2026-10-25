@@ -1,12 +1,16 @@
-import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 import 'dart:ui';
 
+import 'package:android_intent_plus/android_intent.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:image/image.dart' as img;
+import 'package:image_cropper/image_cropper.dart';
+import 'package:native_exif/native_exif.dart';
 import 'package:photo_view/photo_view.dart';
 import 'package:photo_view/photo_view_gallery.dart';
-import 'package:image_cropper/image_cropper.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../core/vault_service.dart';
@@ -25,11 +29,13 @@ class PreviewItem {
   final ImageProvider Function() imageBuilder;
   final String heroTag;
   final String? title;
-  final File? file; // used to show file size in Info
+  final File? file; // used for Info, EXIF, rotation save
+  final Future<File?> Function()? fileLoader; // gallery assets ki (originFile)
   final Map<String, String> details; // extra rows for Info sheet
   final Future<Map<String, String>> Function()? detailsLoader; // rich async Info
   final void Function(BuildContext context)? onPlay;
   final Object? data; // original object (VaultItem, AssetEntity, ...)
+  final bool editable; // true => rotation save + EXIF edit allowed on [file]
 
   const PreviewItem({
     required this.id,
@@ -38,10 +44,12 @@ class PreviewItem {
     this.isVideo = false,
     this.title,
     this.file,
+    this.fileLoader,
     this.details = const {},
     this.detailsLoader,
     this.onPlay,
     this.data,
+    this.editable = false,
   });
 
   factory PreviewItem.fromVault(
@@ -62,6 +70,7 @@ class PreviewItem {
       file: File(v.encryptedPath),
       details: {'Type': isVideo ? 'Video' : 'Photo'},
       detailsLoader: detailsLoader,
+      editable: !isVideo && !trash,
       onPlay: (ctx) => Navigator.push(
         ctx,
         MaterialPageRoute(
@@ -89,6 +98,7 @@ class PreviewAction {
   final Future<void> Function(PreviewItem item) run;
   final bool inDock;
   final bool removesItem; // remove from viewer list after run
+  final bool modifiesFile; // reload image in viewer after run
   final String? confirmTitle;
   final String? confirmMessage;
 
@@ -99,6 +109,7 @@ class PreviewAction {
     this.color = const Color(0xFF65B7FF),
     this.inDock = true,
     this.removesItem = true,
+    this.modifiesFile = false,
     this.confirmTitle,
     this.confirmMessage,
   });
@@ -153,6 +164,7 @@ class PreviewActions {
         color: const Color(0xFFFFC857),
         inDock: false,
         removesItem: false,
+        modifiesFile: true,
         run: _cropRotate,
       ),
       PreviewAction(
@@ -173,7 +185,7 @@ class PreviewActions {
 
   static Future<void> _cropRotate(PreviewItem i) async {
     final v = i.data as VaultItem;
-    if (v.type == 'video') return; // videos ki crop ledu
+    if (v.type == 'video') return;
 
     final cropped = await ImageCropper().cropImage(
       sourcePath: v.encryptedPath,
@@ -192,7 +204,7 @@ class PreviewActions {
         IOSUiSettings(title: 'Crop & Rotate'),
       ],
     );
-    if (cropped == null) return;
+    if (cropped == null) throw const PreviewCancelled();
 
     await File(cropped.path).copy(v.encryptedPath); // original overwrite
     PaintingBinding.instance.imageCache
@@ -253,24 +265,128 @@ class UniversalPreviewScreen extends StatefulWidget {
 }
 
 class _UniversalPreviewScreenState extends State<UniversalPreviewScreen> {
+  static const _blue = Color(0xFF65B7FF);
+
   late final PageController _pc =
       PageController(initialPage: widget.initialIndex);
   late final List<PreviewItem> _items = List.of(widget.items);
   late int _index = widget.initialIndex.clamp(0, _items.length - 1);
   bool _chrome = true;
   bool _changed = false;
-  Timer? _slideshow;
+  bool _fill = false; // landscape photos -> rotate to fill portrait screen
+  bool _saving = false;
+
+  final Map<String, int> _turns = {}; // manual quarter turns per item
+  final Map<String, int> _rev = {}; // bumps when file content changes
+  final Map<String, Size> _dims = {}; // decoded image size per item
+  final Set<String> _dimLoading = {};
 
   PreviewItem get _cur => _items[_index];
 
   @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _warm(_index));
+  }
+
+  @override
   void dispose() {
-    _slideshow?.cancel();
     _pc.dispose();
     super.dispose();
   }
 
   void _close() => Navigator.pop(context, _changed);
+
+  // ── image helpers ──────────────────────────────────────────
+
+  ImageProvider _provider(PreviewItem it) =>
+      ResizeImage.resizeIfNeeded(2400, null, it.imageBuilder());
+
+  /// Preload neighbours so swiping is instant.
+  void _warm(int i) {
+    if (!mounted) return;
+    for (final j in [i - 1, i, i + 1]) {
+      if (j < 0 || j >= _items.length) continue;
+      final it = _items[j];
+      precacheImage(_provider(it), context);
+      _ensureDims(it);
+    }
+  }
+
+  void _ensureDims(PreviewItem it) {
+    if (_dims.containsKey(it.id) || _dimLoading.contains(it.id)) return;
+    _dimLoading.add(it.id);
+    final stream = _provider(it).resolve(ImageConfiguration.empty);
+    late ImageStreamListener l;
+    l = ImageStreamListener(
+      (info, _) {
+        _dims[it.id] =
+            Size(info.image.width.toDouble(), info.image.height.toDouble());
+        _dimLoading.remove(it.id);
+        stream.removeListener(l);
+        if (mounted) setState(() {});
+      },
+      onError: (_, __) {
+        _dimLoading.remove(it.id);
+        stream.removeListener(l);
+      },
+    );
+    stream.addListener(l);
+  }
+
+  void _bump(String id) {
+    _rev[id] = (_rev[id] ?? 0) + 1;
+    _dims.remove(id);
+    _dimLoading.remove(id);
+    _turns[id] = 0;
+    PaintingBinding.instance.imageCache
+      ..clear()
+      ..clearLiveImages();
+  }
+
+  // ── rotation ───────────────────────────────────────────────
+
+  int _quarterTurns(PreviewItem it) {
+    final manual = _turns[it.id] ?? 0;
+    final d = _dims[it.id];
+    final autoFill = _fill &&
+        d != null &&
+        d.width > d.height &&
+        MediaQuery.of(context).orientation == Orientation.portrait;
+    return (manual + (autoFill ? 1 : 0)) % 4;
+  }
+
+  void _rotate(int dir) {
+    final id = _cur.id;
+    setState(() => _turns[id] = (((_turns[id] ?? 0) + dir) % 4 + 4) % 4);
+    HapticFeedback.selectionClick();
+  }
+
+  bool get _needsSave =>
+      _cur.editable && _cur.file != null && (_turns[_cur.id] ?? 0) != 0;
+
+  Future<void> _saveRotation() async {
+    final it = _cur;
+    final q = _turns[it.id] ?? 0;
+    final f = it.file;
+    if (q == 0 || f == null || _saving) return;
+    setState(() => _saving = true);
+    try {
+      final bytes = await f.readAsBytes();
+      final out = await compute(_rotateBytes, <Object>[bytes, q]);
+      if (out == null) throw 'decode failed';
+      await f.writeAsBytes(out, flush: true);
+      if (!mounted) return;
+      setState(() => _bump(it.id));
+      _changed = true;
+      widget.onChanged?.call();
+      _toast('Rotation saved');
+    } catch (_) {
+      _toast('Save cheyyalekapoyam');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
 
   // ── actions ────────────────────────────────────────────────
 
@@ -309,11 +425,12 @@ class _UniversalPreviewScreenState extends State<UniversalPreviewScreen> {
     widget.onChanged?.call();
 
     if (!a.removesItem) {
-      setState(() {});
+      setState(() {
+        if (a.modifiesFile) _bump(item.id);
+      });
       return;
     }
 
-    _stopSlideshow();
     if (_items.length <= 1) {
       _close();
       return;
@@ -324,46 +441,43 @@ class _UniversalPreviewScreenState extends State<UniversalPreviewScreen> {
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_pc.hasClients) _pc.jumpToPage(_index);
+      _warm(_index);
     });
   }
 
-  // ── slideshow ──────────────────────────────────────────────
-
-  void _toggleSlideshow() {
-    if (_slideshow != null) {
-      _stopSlideshow();
-      return;
-    }
-    setState(() => _chrome = false);
-    _slideshow = Timer.periodic(const Duration(seconds: 3), (_) {
-      if (!mounted || _items.length < 2 || !_pc.hasClients) return;
-      _pc.animateToPage(
-        (_index + 1) % _items.length,
-        duration: const Duration(milliseconds: 450),
-        curve: Curves.easeInOutCubic,
-      );
-    });
+  void _toast(String t) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+        content: Text(t),
+        duration: const Duration(milliseconds: 1600),
+      ));
   }
 
-  void _stopSlideshow() {
-    _slideshow?.cancel();
-    _slideshow = null;
-    if (mounted) setState(() {});
-  }
-
-  void _onTapViewer() {
-    if (_slideshow != null) {
-      _stopSlideshow();
-      setState(() => _chrome = true);
-      return;
+  Future<void> _editExif() async {
+    final it = _cur;
+    final f = it.file;
+    if (f == null) return;
+    final res = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => _ExifEditor(file: f),
+    );
+    if (res == true && mounted) {
+      setState(() => _bump(it.id));
+      _changed = true;
+      widget.onChanged?.call();
+      _toast('Metadata updated');
     }
-    setState(() => _chrome = !_chrome);
   }
 
   // ── sheets ─────────────────────────────────────────────────
 
   void _showMore() {
     final extra = widget.actions.where((a) => !a.inDock).toList();
+    final it = _cur;
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
@@ -380,27 +494,17 @@ class _UniversalPreviewScreenState extends State<UniversalPreviewScreen> {
                   Navigator.pop(ctx);
                   _showInfo();
                 }),
-                _sheetTile(
-                  _slideshow != null
-                      ? Icons.pause_circle_outline_rounded
-                      : Icons.slideshow_rounded,
-                  _slideshow != null ? 'Stop show' : 'Slideshow',
-                  const Color(0xFFB892FF),
-                  () {
+                if (it.editable && it.file != null && !it.isVideo)
+                  _sheetTile(Icons.edit_note_rounded, 'Edit EXIF',
+                      const Color(0xFFFFC857), () {
                     Navigator.pop(ctx);
-                    _toggleSlideshow();
-                  },
-                ),
+                    _editExif();
+                  }),
                 _sheetTile(Icons.copy_rounded, 'Copy name',
                     const Color(0xFF7CE0B0), () {
                   Navigator.pop(ctx);
                   Clipboard.setData(ClipboardData(text: _cur.title ?? ''));
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Name copied'),
-                      duration: Duration(seconds: 1),
-                    ),
-                  );
+                  _toast('Name copied');
                 }),
                 for (final a in extra)
                   _sheetTile(a.icon, a.label, a.color, () {
@@ -414,8 +518,6 @@ class _UniversalPreviewScreenState extends State<UniversalPreviewScreen> {
       ),
     );
   }
-
-  static const _blue = Color(0xFF65B7FF);
 
   Widget _sheetTile(
       IconData icon, String label, Color color, VoidCallback onTap) {
@@ -469,6 +571,39 @@ class _UniversalPreviewScreenState extends State<UniversalPreviewScreen> {
     return '${(b / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
   }
 
+  Future<List<MapEntry<String, String>>> _loadInfo(PreviewItem it) async {
+    final rows = <MapEntry<String, String>>[];
+    bool has(String k) => rows.any((e) => e.key == k);
+
+    if (it.detailsLoader != null) {
+      try {
+        rows.addAll((await it.detailsLoader!()).entries);
+      } catch (_) {}
+    } else {
+      rows.add(MapEntry('Name', it.title ?? '-'));
+      rows.add(MapEntry('Position', '${_index + 1} of ${_items.length}'));
+      rows.addAll(it.details.entries);
+    }
+
+    final f = it.file ?? await it.fileLoader?.call();
+    if (f != null && await f.exists()) {
+      if (!has('Size')) rows.add(MapEntry('Size', _fmtSize(await f.length())));
+      if (!it.isVideo) {
+        final s = await _readSize(f);
+        if (s != null && !has('Resolution')) {
+          final mp = (s.width * s.height / 1e6).toStringAsFixed(1);
+          rows.add(MapEntry('Resolution',
+              '${s.width.toInt()} × ${s.height.toInt()}  ($mp MP)'));
+        }
+        for (final e in await _readExif(f)) {
+          if (!has(e.key)) rows.add(e);
+        }
+      }
+      rows.add(MapEntry('Path', f.path));
+    }
+    return rows;
+  }
+
   void _showInfo() {
     final item = _cur;
     showModalBottomSheet(
@@ -483,7 +618,7 @@ class _UniversalPreviewScreenState extends State<UniversalPreviewScreen> {
             padding: const EdgeInsets.all(18),
             child: ConstrainedBox(
               constraints: BoxConstraints(
-                maxHeight: MediaQuery.of(ctx).size.height * 0.7,
+                maxHeight: MediaQuery.of(ctx).size.height * 0.72,
               ),
               child: SingleChildScrollView(
                 child: Column(
@@ -496,42 +631,27 @@ class _UniversalPreviewScreenState extends State<UniversalPreviewScreen> {
                             fontSize: 18,
                             fontWeight: FontWeight.w800)),
                     const SizedBox(height: 14),
-                    if (item.detailsLoader != null)
-                      FutureBuilder<Map<String, String>>(
-                        future: item.detailsLoader!(),
-                        builder: (_, s) {
-                          if (s.connectionState != ConnectionState.done) {
-                            return const Padding(
-                              padding: EdgeInsets.symmetric(vertical: 24),
-                              child: Center(child: CircularProgressIndicator()),
-                            );
-                          }
-                          if (!s.hasData) {
-                            return _infoRow('Error', 'Unable to load details');
-                          }
-                          return Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              for (final e in s.data!.entries)
-                                _infoRow(e.key, e.value),
-                            ],
+                    FutureBuilder<List<MapEntry<String, String>>>(
+                      future: _loadInfo(item),
+                      builder: (_, s) {
+                        if (s.connectionState != ConnectionState.done) {
+                          return const Padding(
+                            padding: EdgeInsets.symmetric(vertical: 24),
+                            child: Center(child: CircularProgressIndicator()),
                           );
-                        },
-                      )
-                    else ...[
-                      _infoRow('Name', item.title ?? '-'),
-                      _infoRow('Position', '${_index + 1} of ${_items.length}'),
-                      for (final e in item.details.entries)
-                        _infoRow(e.key, e.value),
-                      if (item.file != null)
-                        FutureBuilder<int>(
-                          future: item.file!.length(),
-                          builder: (_, s) => _infoRow(
-                            'Size',
-                            s.hasData ? _fmtSize(s.data!) : '...',
-                          ),
-                        ),
-                    ],
+                        }
+                        final rows = s.data ?? const [];
+                        return Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            for (final e in rows)
+                              e.key == 'Path'
+                                  ? _pathRow(e.value)
+                                  : _infoRow(e.key, e.value),
+                          ],
+                        );
+                      },
+                    ),
                   ],
                 ),
               ),
@@ -541,13 +661,14 @@ class _UniversalPreviewScreenState extends State<UniversalPreviewScreen> {
       ),
     );
   }
+
   Widget _infoRow(String k, String v) => Padding(
         padding: const EdgeInsets.only(bottom: 10),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             SizedBox(
-              width: 82,
+              width: 92,
               child: Text(k,
                   style: TextStyle(
                       color: Colors.white.withOpacity(0.55),
@@ -562,36 +683,54 @@ class _UniversalPreviewScreenState extends State<UniversalPreviewScreen> {
         ),
       );
 
-  // ── shared widgets ─────────────────────────────────────────
-
-  Widget _glass({
-    required Widget child,
-    BorderRadius radius = const BorderRadius.all(Radius.circular(24)),
-    EdgeInsetsGeometry padding = EdgeInsets.zero,
-  }) {
-    return ClipRRect(
-      borderRadius: radius,
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 22, sigmaY: 22),
-        child: Container(
-          padding: padding,
-          decoration: BoxDecoration(
-            color: const Color(0xCC101116),
-            borderRadius: radius,
-            border: Border.all(color: Colors.white.withOpacity(0.13)),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withOpacity(0.24),
-                blurRadius: 24,
-                offset: const Offset(0, 8),
+  /// Tap = open folder in default file manager, long-press = copy path.
+  Widget _pathRow(String path) => InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: () async {
+          final ok = await _openFolder(path);
+          if (!ok) {
+            await Clipboard.setData(ClipboardData(text: path));
+            _toast('Folder open avvaledu (private folder) — path copy chesa');
+          }
+        },
+        onLongPress: () {
+          Clipboard.setData(ClipboardData(text: path));
+          _toast('Path copied');
+        },
+        child: Padding(
+          padding: const EdgeInsets.only(bottom: 10),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SizedBox(
+                width: 92,
+                child: Text('Path',
+                    style: TextStyle(
+                        color: Colors.white.withOpacity(0.55),
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600)),
+              ),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(path,
+                        style: const TextStyle(
+                            color: _blue, fontSize: 13.5, height: 1.25)),
+                    const SizedBox(height: 3),
+                    Text('Tap: file manager • Long press: copy',
+                        style: TextStyle(
+                            color: Colors.white.withOpacity(0.4),
+                            fontSize: 11)),
+                  ],
+                ),
               ),
             ],
           ),
-          child: child,
         ),
-      ),
-    );
-  }
+      );
+
+  // ── shared widgets ─────────────────────────────────────────
 
   Widget _dockButton({
     required IconData icon,
@@ -644,6 +783,16 @@ class _UniversalPreviewScreenState extends State<UniversalPreviewScreen> {
     );
   }
 
+  Widget _topIcon(IconData icon, VoidCallback onTap,
+      {String? tip, bool active = false}) {
+    return IconButton(
+      tooltip: tip,
+      visualDensity: VisualDensity.compact,
+      onPressed: onTap,
+      icon: Icon(icon, color: active ? _blue : Colors.white, size: 22),
+    );
+  }
+
   // ── build ──────────────────────────────────────────────────
 
   @override
@@ -683,30 +832,56 @@ class _UniversalPreviewScreenState extends State<UniversalPreviewScreen> {
 
             GestureDetector(
               behavior: HitTestBehavior.opaque,
-              onTap: _onTapViewer,
+              onTap: () => setState(() => _chrome = !_chrome),
               child: PhotoViewGallery.builder(
                 pageController: _pc,
                 itemCount: _items.length,
-                onPageChanged: (i) => setState(() => _index = i),
+                scrollPhysics: const BouncingScrollPhysics(),
+                onPageChanged: (i) {
+                  setState(() => _index = i);
+                  _warm(i);
+                },
                 backgroundDecoration:
                     const BoxDecoration(color: Colors.transparent),
                 builder: (_, i) {
                   final it = _items[i];
-                  return PhotoViewGalleryPageOptions(
-                    key: ValueKey(it.id),
-                    imageProvider: ResizeImage.resizeIfNeeded(
-                      2400,
-                      null,
-                      it.imageBuilder(),
-                    ),
-                    heroAttributes: PhotoViewHeroAttributes(tag: it.heroTag),
+                  final rev = _rev[it.id] ?? 0;
+                  final dims = _dims[it.id];
+                  if (dims == null) {
+                    WidgetsBinding.instance
+                        .addPostFrameCallback((_) => _ensureDims(it));
+                  }
+                  final q = _quarterTurns(it);
+                  final base = dims ?? media.size;
+                  final box = q.isOdd ? Size(base.height, base.width) : base;
+
+                  return PhotoViewGalleryPageOptions.customChild(
+                    childSize: box,
+                    initialScale: PhotoViewComputedScale.contained,
                     minScale: PhotoViewComputedScale.contained,
                     maxScale: PhotoViewComputedScale.covered * 3,
-                    errorBuilder: (_, __, ___) => const Center(
-                      child: Icon(
-                        Icons.broken_image_outlined,
-                        color: Colors.white54,
-                        size: 54,
+                    heroAttributes: PhotoViewHeroAttributes(tag: it.heroTag),
+                    child: RepaintBoundary(
+                      child: SizedBox(
+                        width: box.width,
+                        height: box.height,
+                        child: RotatedBox(
+                          quarterTurns: q,
+                          child: Image(
+                            key: ValueKey('${it.id}#$rev'),
+                            image: _provider(it),
+                            fit: BoxFit.contain,
+                            gaplessPlayback: true,
+                            filterQuality: FilterQuality.medium,
+                            errorBuilder: (_, __, ___) => const Center(
+                              child: Icon(
+                                Icons.broken_image_outlined,
+                                color: Colors.white54,
+                                size: 54,
+                              ),
+                            ),
+                          ),
+                        ),
                       ),
                     ),
                   );
@@ -760,7 +935,7 @@ class _UniversalPreviewScreenState extends State<UniversalPreviewScreen> {
                         child: _glass(
                           radius: BorderRadius.circular(22),
                           padding: const EdgeInsets.symmetric(
-                              horizontal: 8, vertical: 5),
+                              horizontal: 4, vertical: 5),
                           child: Row(
                             children: [
                               IconButton(
@@ -769,7 +944,6 @@ class _UniversalPreviewScreenState extends State<UniversalPreviewScreen> {
                                 icon: const Icon(Icons.arrow_back_rounded,
                                     color: Colors.white),
                               ),
-                              const SizedBox(width: 4),
                               Expanded(
                                 child: Column(
                                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -799,22 +973,25 @@ class _UniversalPreviewScreenState extends State<UniversalPreviewScreen> {
                                   ],
                                 ),
                               ),
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 10, vertical: 7),
-                                decoration: BoxDecoration(
-                                  color: Colors.white.withOpacity(0.08),
-                                  borderRadius: BorderRadius.circular(12),
+                              if (!item.isVideo) ...[
+                                _topIcon(Icons.rotate_left_rounded,
+                                    () => _rotate(-1),
+                                    tip: 'Rotate left'),
+                                _topIcon(Icons.rotate_right_rounded,
+                                    () => _rotate(1),
+                                    tip: 'Rotate right'),
+                                _topIcon(
+                                  Icons.stay_current_landscape_rounded,
+                                  () => setState(() => _fill = !_fill),
+                                  tip: 'Landscape fill',
+                                  active: _fill,
                                 ),
-                                child: Icon(
-                                  item.isVideo
-                                      ? Icons.videocam_rounded
-                                      : Icons.photo_rounded,
-                                  color: Colors.white70,
-                                  size: 18,
+                              ] else
+                                const Padding(
+                                  padding: EdgeInsets.only(right: 12),
+                                  child: Icon(Icons.videocam_rounded,
+                                      color: Colors.white70, size: 20),
                                 ),
-                              ),
-                              const SizedBox(width: 8),
                             ],
                           ),
                         ),
@@ -825,7 +1002,7 @@ class _UniversalPreviewScreenState extends State<UniversalPreviewScreen> {
               ),
             ),
 
-            // Bottom dock
+            // Bottom dock (+ save-rotation pill)
             Positioned(
               left: 14,
               right: 14,
@@ -839,26 +1016,62 @@ class _UniversalPreviewScreenState extends State<UniversalPreviewScreen> {
                   opacity: _chrome ? 1 : 0,
                   child: IgnorePointer(
                     ignoring: !_chrome,
-                    child: _glass(
-                      radius: BorderRadius.circular(26),
-                      padding: const EdgeInsets.fromLTRB(8, 8, 8, 6),
-                      child: Row(
-                        children: [
-                          for (final a in dockActions)
-                            _dockButton(
-                              icon: a.icon,
-                              label: a.label,
-                              color: a.color,
-                              onTap: () => _run(a),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (_needsSave)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 10),
+                            child: GestureDetector(
+                              onTap: _saveRotation,
+                              child: _glass(
+                                radius: BorderRadius.circular(30),
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 18, vertical: 11),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    _saving
+                                        ? const SizedBox(
+                                            width: 16,
+                                            height: 16,
+                                            child: CircularProgressIndicator(
+                                                strokeWidth: 2),
+                                          )
+                                        : const Icon(Icons.check_rounded,
+                                            color: _blue, size: 20),
+                                    const SizedBox(width: 8),
+                                    const Text('Save rotation',
+                                        style: TextStyle(
+                                            color: Colors.white,
+                                            fontWeight: FontWeight.w700)),
+                                  ],
+                                ),
+                              ),
                             ),
-                          _dockButton(
-                            icon: Icons.more_horiz_rounded,
-                            label: 'More',
-                            color: Colors.white,
-                            onTap: _showMore,
                           ),
-                        ],
-                      ),
+                        _glass(
+                          radius: BorderRadius.circular(26),
+                          padding: const EdgeInsets.fromLTRB(8, 8, 8, 6),
+                          child: Row(
+                            children: [
+                              for (final a in dockActions)
+                                _dockButton(
+                                  icon: a.icon,
+                                  label: a.label,
+                                  color: a.color,
+                                  onTap: () => _run(a),
+                                ),
+                              _dockButton(
+                                icon: Icons.more_horiz_rounded,
+                                label: 'More',
+                                color: Colors.white,
+                                onTap: _showMore,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
@@ -869,4 +1082,472 @@ class _UniversalPreviewScreenState extends State<UniversalPreviewScreen> {
       ),
     );
   }
+}
+
+// ─────────────────────────────────────────────────────────────
+// EXIF EDITOR
+// ─────────────────────────────────────────────────────────────
+
+class _ExifEditor extends StatefulWidget {
+  final File file;
+  const _ExifEditor({required this.file});
+
+  @override
+  State<_ExifEditor> createState() => _ExifEditorState();
+}
+
+class _ExifEditorState extends State<_ExifEditor> {
+  final _desc = TextEditingController();
+  final _artist = TextEditingController();
+  final _make = TextEditingController();
+  final _model = TextEditingController();
+  final _lat = TextEditingController();
+  final _lon = TextEditingController();
+  DateTime? _date;
+  bool _loading = true;
+  bool _busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void dispose() {
+    for (final c in [_desc, _artist, _make, _model, _lat, _lon]) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    Exif? exif;
+    try {
+      exif = await Exif.fromPath(widget.file.path);
+      final a = await exif.getAttributes() ?? {};
+      String s(String k) => '${a[k] ?? ''}'.trim();
+      _desc.text = s('ImageDescription');
+      _artist.text = s('Artist');
+      _make.text = s('Make');
+      _model.text = s('Model');
+      _date = _parseExifDate(
+          s('DateTimeOriginal').isNotEmpty ? s('DateTimeOriginal') : s('DateTime'));
+      final ll = await exif.getLatLong();
+      if (ll != null) {
+        _lat.text = ll.latitude.toStringAsFixed(6);
+        _lon.text = ll.longitude.toStringAsFixed(6);
+      }
+    } catch (_) {
+    } finally {
+      await exif?.close();
+    }
+    if (mounted) setState(() => _loading = false);
+  }
+
+  Future<void> _pickDate() async {
+    final now = _date ?? DateTime.now();
+    final d = await showDatePicker(
+      context: context,
+      initialDate: now,
+      firstDate: DateTime(1970),
+      lastDate: DateTime(2100),
+    );
+    if (d == null || !mounted) return;
+    final t = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(now),
+    );
+    if (t == null) return;
+    setState(() => _date = DateTime(d.year, d.month, d.day, t.hour, t.minute));
+  }
+
+  Future<void> _save() async {
+    setState(() => _busy = true);
+    Exif? exif;
+    try {
+      exif = await Exif.fromPath(widget.file.path);
+      final m = <String, Object>{};
+      void put(String k, String v) {
+        if (v.trim().isNotEmpty) m[k] = v.trim();
+      }
+
+      put('ImageDescription', _desc.text);
+      put('Artist', _artist.text);
+      put('Make', _make.text);
+      put('Model', _model.text);
+      if (_date != null) {
+        final s = _fmtExifDate(_date!);
+        m['DateTimeOriginal'] = s;
+        m['DateTimeDigitized'] = s;
+        m['DateTime'] = s;
+      }
+
+      final la = double.tryParse(_lat.text.trim());
+      final lo = double.tryParse(_lon.text.trim());
+      if (la != null && lo != null && la.abs() <= 90 && lo.abs() <= 180) {
+        m.addAll(_gpsAttrs(la, lo));
+      }
+      if (m.isNotEmpty) await exif.writeAttributes(m);
+
+      await exif.close();
+      exif = null;
+      if (mounted) Navigator.pop(context, true);
+    } catch (_) {
+      await exif?.close();
+      if (mounted) {
+        setState(() => _busy = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('EXIF write avvaledu (JPEG ki matrame)')),
+        );
+      }
+    }
+  }
+
+  Future<void> _strip() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF16181F),
+        title: const Text('Remove all metadata?',
+            style: TextStyle(color: Colors.white)),
+        content: const Text(
+          'Location, camera, date anni delete avthayi. Image re-save avthundi.',
+          style: TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Remove',
+                  style: TextStyle(color: Color(0xFFFF647C)))),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    setState(() => _busy = true);
+    try {
+      final bytes = await widget.file.readAsBytes();
+      final out = await compute(_stripBytes, bytes);
+      if (out == null) throw 'decode';
+      await widget.file.writeAsBytes(out, flush: true);
+      if (mounted) Navigator.pop(context, true);
+    } catch (_) {
+      if (mounted) {
+        setState(() => _busy = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Metadata remove avvaledu')),
+        );
+      }
+    }
+  }
+
+  Widget _field(TextEditingController c, String label,
+      {TextInputType? type}) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: TextField(
+        controller: c,
+        keyboardType: type,
+        style: const TextStyle(color: Colors.white),
+        decoration: InputDecoration(
+          labelText: label,
+          labelStyle: TextStyle(color: Colors.white.withOpacity(0.6)),
+          isDense: true,
+          filled: true,
+          fillColor: Colors.white.withOpacity(0.06),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(14),
+            borderSide: BorderSide.none,
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final mq = MediaQuery.of(context);
+    final kb = mq.viewInsets.bottom;
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(14, 14, 14, 14 + kb),
+        child: _glass(
+          radius: BorderRadius.circular(26),
+          padding: const EdgeInsets.all(18),
+          child: ConstrainedBox(
+            constraints:
+                BoxConstraints(maxHeight: (mq.size.height - kb) * 0.78),
+            child: _loading
+                ? const SizedBox(
+                    height: 120,
+                    child: Center(child: CircularProgressIndicator()),
+                  )
+                : SingleChildScrollView(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('Edit EXIF',
+                            style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 18,
+                                fontWeight: FontWeight.w800)),
+                        const SizedBox(height: 14),
+                        InkWell(
+                          borderRadius: BorderRadius.circular(14),
+                          onTap: _pickDate,
+                          child: Container(
+                            width: double.infinity,
+                            margin: const EdgeInsets.only(bottom: 10),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 14, vertical: 14),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withOpacity(0.06),
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                            child: Row(
+                              children: [
+                                const Icon(Icons.event_rounded,
+                                    color: Color(0xFFFFC857), size: 20),
+                                const SizedBox(width: 10),
+                                Text(
+                                  _date == null
+                                      ? 'Date taken (tap to set)'
+                                      : _fmtExifDate(_date!),
+                                  style: const TextStyle(color: Colors.white),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        _field(_desc, 'Description'),
+                        _field(_artist, 'Artist'),
+                        Row(children: [
+                          Expanded(child: _field(_make, 'Make')),
+                          const SizedBox(width: 10),
+                          Expanded(child: _field(_model, 'Model')),
+                        ]),
+                        Row(children: [
+                          Expanded(
+                              child: _field(_lat, 'Latitude',
+                                  type: const TextInputType.numberWithOptions(
+                                      decimal: true, signed: true))),
+                          const SizedBox(width: 10),
+                          Expanded(
+                              child: _field(_lon, 'Longitude',
+                                  type: const TextInputType.numberWithOptions(
+                                      decimal: true, signed: true))),
+                        ]),
+                        const SizedBox(height: 4),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: OutlinedButton.icon(
+                                onPressed: _busy ? null : _strip,
+                                icon: const Icon(Icons.layers_clear_rounded,
+                                    size: 18),
+                                label: const Text('Strip all'),
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: FilledButton.icon(
+                                onPressed: _busy ? null : _save,
+                                icon: _busy
+                                    ? const SizedBox(
+                                        width: 16,
+                                        height: 16,
+                                        child: CircularProgressIndicator(
+                                            strokeWidth: 2))
+                                    : const Icon(Icons.save_rounded, size: 18),
+                                label: const Text('Save'),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// TOP-LEVEL HELPERS
+// ─────────────────────────────────────────────────────────────
+
+Widget _glass({
+  required Widget child,
+  BorderRadius radius = const BorderRadius.all(Radius.circular(24)),
+  EdgeInsetsGeometry padding = EdgeInsets.zero,
+}) {
+  return ClipRRect(
+    borderRadius: radius,
+    child: BackdropFilter(
+      filter: ImageFilter.blur(sigmaX: 22, sigmaY: 22),
+      child: Container(
+        padding: padding,
+        decoration: BoxDecoration(
+          color: const Color(0xCC101116),
+          borderRadius: radius,
+          border: Border.all(color: Colors.white.withOpacity(0.13)),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.24),
+              blurRadius: 24,
+              offset: const Offset(0, 8),
+            ),
+          ],
+        ),
+        child: child,
+      ),
+    ),
+  );
+}
+
+/// Opens the file's folder in the default Android file manager.
+Future<bool> _openFolder(String filePath) async {
+  if (!Platform.isAndroid) return false;
+  final dir = File(filePath).parent.path;
+  const root = '/storage/emulated/0/';
+  if (!dir.startsWith(root)) return false;
+  final rel = dir.substring(root.length);
+  final uri =
+      'content://com.android.externalstorage.documents/document/primary%3A${Uri.encodeComponent(rel)}';
+  try {
+    await AndroidIntent(
+      action: 'android.intent.action.VIEW',
+      data: uri,
+      type: 'vnd.android.document/directory',
+    ).launch();
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+/// Reads dimensions without fully decoding the image.
+Future<Size?> _readSize(File f) async {
+  try {
+    final buf = await ImmutableBuffer.fromUint8List(await f.readAsBytes());
+    final d = await ImageDescriptor.encoded(buf);
+    final s = Size(d.width.toDouble(), d.height.toDouble());
+    d.dispose();
+    buf.dispose();
+    return s;
+  } catch (_) {
+    return null;
+  }
+}
+
+Future<List<MapEntry<String, String>>> _readExif(File f) async {
+  final out = <MapEntry<String, String>>[];
+  Exif? e;
+  try {
+    e = await Exif.fromPath(f.path);
+    final a = await e.getAttributes() ?? {};
+    String? g(String k) {
+      final v = a[k];
+      if (v == null) return null;
+      final s = '$v'.trim();
+      return s.isEmpty ? null : s;
+    }
+
+    final cam = [g('Make'), g('Model')].whereType<String>().join(' ');
+    if (cam.isNotEmpty) out.add(MapEntry('Camera', cam));
+    final d = g('DateTimeOriginal') ?? g('DateTime');
+    if (d != null) out.add(MapEntry('Taken', d));
+    final fn = g('FNumber');
+    if (fn != null) out.add(MapEntry('Aperture', 'f/$fn'));
+    final ex = g('ExposureTime');
+    if (ex != null) out.add(MapEntry('Shutter', '$ex s'));
+    final iso = g('ISOSpeedRatings') ?? g('PhotographicSensitivity');
+    if (iso != null) out.add(MapEntry('ISO', iso));
+    final fl = g('FocalLength');
+    if (fl != null) out.add(MapEntry('Focal length', fl));
+    final desc = g('ImageDescription');
+    if (desc != null) out.add(MapEntry('Description', desc));
+    final art = g('Artist');
+    if (art != null) out.add(MapEntry('Artist', art));
+    final ll = await e.getLatLong();
+    if (ll != null) {
+      out.add(MapEntry('Location',
+          '${ll.latitude.toStringAsFixed(5)}, ${ll.longitude.toStringAsFixed(5)}'));
+    }
+  } catch (_) {
+  } finally {
+    await e?.close();
+  }
+  return out;
+}
+
+/// GPS tags ni EXIF format (deg/1,min/1,sec/10000) lo ichestundi.
+Map<String, Object> _gpsAttrs(double lat, double lon) {
+  String dms(double v) {
+    v = v.abs();
+    final d = v.floor();
+    final mFull = (v - d) * 60;
+    final m = mFull.floor();
+    final s = ((mFull - m) * 60 * 10000).round();
+    return '$d/1,$m/1,$s/10000';
+  }
+
+  return {
+    'GPSLatitude': dms(lat),
+    'GPSLatitudeRef': lat >= 0 ? 'N' : 'S',
+    'GPSLongitude': dms(lon),
+    'GPSLongitudeRef': lon >= 0 ? 'E' : 'W',
+  };
+}
+
+String _fmtExifDate(DateTime d) {
+  String p(int n) => n.toString().padLeft(2, '0');
+  return '${d.year}:${p(d.month)}:${p(d.day)} ${p(d.hour)}:${p(d.minute)}:${p(d.second)}';
+}
+
+DateTime? _parseExifDate(String s) {
+  // "2024:05:17 14:03:22"
+  final m = RegExp(r'^(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})')
+      .firstMatch(s);
+  if (m == null) return null;
+  int g(int i) => int.parse(m.group(i)!);
+  try {
+    return DateTime(g(1), g(2), g(3), g(4), g(5), g(6));
+  } catch (_) {
+    return null;
+  }
+}
+
+// ── isolate workers (UI lag undadu) ──
+
+Uint8List _encodeLike(Uint8List src, img.Image im) {
+  final fmt = img.findFormatForData(src);
+  if (fmt == img.ImageFormat.png) {
+    return Uint8List.fromList(img.encodePng(im));
+  }
+  return Uint8List.fromList(img.encodeJpg(im, quality: 95));
+}
+
+Uint8List? _rotateBytes(List<Object> args) {
+  final bytes = args[0] as Uint8List;
+  final q = args[1] as int;
+  var im = img.decodeImage(bytes);
+  if (im == null) return null;
+  im = img.bakeOrientation(im);
+  im = img.copyRotate(im, angle: 90.0 * q);
+  return _encodeLike(bytes, im);
+}
+
+Uint8List? _stripBytes(Uint8List bytes) {
+  var im = img.decodeImage(bytes);
+  if (im == null) return null;
+  im = img.bakeOrientation(im);
+  im.exif = img.ExifData();
+  return _encodeLike(bytes, im);
 }

@@ -807,10 +807,11 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
       ),
       heroTag: isVideo ? 'vid_${a.id}' : 'photo_${a.id}',
       title: a.title,
+      fileLoader: () => a.originFile,
       details: {
         'Type': isVideo ? 'Video' : 'Photo',
         'Date': DateFormat('d MMM yyyy, h:mm a').format(d),
-        'Resolution': '${a.width} × ${a.height}',
+        'Resolution': '${a.orientatedWidth} × ${a.orientatedHeight}',
         if (isVideo) 'Duration': '${a.videoDuration.inSeconds} sec',
       },
       onPlay: (ctx) async {
@@ -871,6 +872,7 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
         color: const Color(0xFFFFC857),
         inDock: false,
         removesItem: false,
+        modifiesFile: true,
         run: (i) => _pvCropRotate(i.data as AssetEntity),
       ),
     ];
@@ -1900,7 +1902,7 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
                   Center(
                     child: Column(
                       children: [
-                        Text('Vault Gallery v1.1.3', style: TextStyle(color: p.text, fontSize: 15, fontWeight: FontWeight.w800)),
+                        Text('Vault Gallery v1.1.4', style: TextStyle(color: p.text, fontSize: 15, fontWeight: FontWeight.w800)),
                         const SizedBox(height: 6),
                         Text('Created by Shiva K ❤️', style: TextStyle(color: p.sub, fontSize: 13, fontWeight: FontWeight.w600)),
                       ],
