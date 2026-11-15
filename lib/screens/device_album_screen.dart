@@ -117,6 +117,12 @@ HeroFlightShuttleBuilder _shuttle(ImageProvider img) {
       );
 }
 
+/// Result of a copy / move operation.
+class _Xfer {
+  int copied = 0, skipped = 0, failed = 0;
+  List<String> deletedIds = [];
+}
+
 // ════════════════════════════════════════════════════════════════════
 //  MAIN SCREEN
 // ════════════════════════════════════════════════════════════════════
@@ -186,12 +192,15 @@ class _DeviceAlbumScreenState extends State<DeviceAlbumScreen> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
   }
 
-  /// Single-item operations kosam simple spinner.
+  /// Single-item operations kosam simple spinner (back button block chestundi).
   Future<T> _busy<T>(Future<T> Function() job) async {
     showDialog<void>(
       context: context,
       barrierDismissible: false,
-      builder: (_) => const Center(child: CircularProgressIndicator()),
+      builder: (_) => const PopScope(
+        canPop: false,
+        child: Center(child: CircularProgressIndicator()),
+      ),
     );
     try {
       return await job();
@@ -311,6 +320,9 @@ class _DeviceAlbumScreenState extends State<DeviceAlbumScreen> {
     );
   }
 
+  // ════════════════════════════════════════════════════════════════
+  //  PROGRESS DIALOG
+  // ════════════════════════════════════════════════════════════════
   double _operationProgress = 0;
   String _operationLabel = 'Preparing...';
   StateSetter? _progressDialogSetState;
@@ -319,30 +331,34 @@ class _DeviceAlbumScreenState extends State<DeviceAlbumScreen> {
     _operationProgress = 0;
     _operationLabel = title;
     _progressDialogSetState = null;
+    final p = context.read<ThemeProvider>().p;
     showDialog<void>(
       context: context,
       barrierDismissible: false,
       builder: (dialogContext) => StatefulBuilder(
         builder: (dialogContext, setDialogState) {
           _progressDialogSetState = setDialogState;
-          return AlertDialog(
-            backgroundColor: context.read<ThemeProvider>().p.surface,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
-            title: Text(title, style: TextStyle(color: context.read<ThemeProvider>().p.text, fontWeight: FontWeight.w700)),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(_operationLabel, style: TextStyle(color: context.read<ThemeProvider>().p.sub, fontSize: 13)),
-                const SizedBox(height: 14),
-                LinearProgressIndicator(value: _operationProgress, minHeight: 7),
-                const SizedBox(height: 10),
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: Text('${(_operationProgress * 100).round()}%',
-                    style: TextStyle(color: context.read<ThemeProvider>().p.text, fontWeight: FontWeight.bold)),
-                ),
-              ],
+          return PopScope(
+            canPop: false,
+            child: AlertDialog(
+              backgroundColor: p.surface,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+              title: Text(title, style: TextStyle(color: p.text, fontWeight: FontWeight.w700)),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(_operationLabel, style: TextStyle(color: p.sub, fontSize: 13)),
+                  const SizedBox(height: 14),
+                  LinearProgressIndicator(value: _operationProgress, minHeight: 7),
+                  const SizedBox(height: 10),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: Text('${(_operationProgress * 100).round()}%',
+                        style: TextStyle(color: p.text, fontWeight: FontWeight.bold)),
+                  ),
+                ],
+              ),
             ),
           );
         },
@@ -361,6 +377,102 @@ class _DeviceAlbumScreenState extends State<DeviceAlbumScreen> {
     if (mounted && Navigator.of(context).canPop()) {
       Navigator.of(context).pop();
     }
+  }
+
+  Future<T> _withProgress<T>(String title, Future<T> Function() job) async {
+    _showOperationProgress(title);
+    try {
+      return await job();
+    } finally {
+      _closeOperationProgress();
+    }
+  }
+
+  // ════════════════════════════════════════════════════════════════
+  //  COPY / MOVE / DELETE CORE
+  // ════════════════════════════════════════════════════════════════
+
+  /// Duplicate detection key (name + resolution + type).
+  String _key(AssetEntity a) =>
+      '${(a.title ?? '').toLowerCase()}|${a.width}x${a.height}|${a.type.index}';
+
+  Future<Set<String>> _targetKeys(AssetPathEntity target) async {
+    final n = await target.assetCountAsync;
+    if (n == 0) return <String>{};
+    final list = await target.getAssetListRange(start: 0, end: n);
+    return {for (final e in list) _key(e)};
+  }
+
+  /// Deletes in chunks, returns ids that were REALLY deleted
+  /// (system dialog lo user cancel chesthe aa chunk return avvadu).
+  Future<List<String>> _deleteIds(List<String> ids) async {
+    final done = <String>[];
+    for (var i = 0; i < ids.length; i += 150) {
+      final end = (i + 150 > ids.length) ? ids.length : i + 150;
+      try {
+        done.addAll(await PhotoManager.editor.deleteWithIds(ids.sublist(i, end)));
+      } catch (e) {
+        debugPrint('Delete chunk failed: $e');
+      }
+    }
+    return done;
+  }
+
+  /// Copy (or move) to a device album. One failure doesn't abort the rest,
+  /// duplicates are skipped, originals are deleted only for files really copied.
+  Future<_Xfer> _transfer(
+    List<AssetEntity> chosen,
+    AssetPathEntity target, {
+    required bool move,
+    required String label,
+  }) async {
+    final r = _Xfer();
+    final existing = await _targetKeys(target);
+    final toDelete = <String>[];
+
+    for (var i = 0; i < chosen.length; i++) {
+      final a = chosen[i];
+      final k = _key(a);
+      if (existing.contains(k)) {
+        r.skipped++;
+      } else {
+        try {
+          final n = await PhotoManager.editor.copyAssetToPath(asset: a, pathEntity: target);
+          if (n != null) {
+            r.copied++;
+            existing.add(k);
+            if (move) toDelete.add(a.id);
+          } else {
+            r.failed++;
+          }
+        } catch (e) {
+          debugPrint('Copy failed for ${a.title}: $e');
+          r.failed++;
+        }
+      }
+      _updateOperationProgress(i + 1, chosen.length, label);
+    }
+
+    if (move && toDelete.isNotEmpty) {
+      _operationLabel = 'Removing originals...';
+      _progressDialogSetState?.call(() {});
+      r.deletedIds = await _deleteIds(toDelete);
+    }
+    return r;
+  }
+
+  String _xferMsg(_Xfer r, String albumName, {required bool move}) {
+    final parts = <String>[];
+    if (move) {
+      if (r.deletedIds.isNotEmpty) parts.add('${r.deletedIds.length} moved to $albumName');
+      final left = r.copied - r.deletedIds.length;
+      if (left > 0) parts.add('$left copied but originals NOT deleted');
+    } else if (r.copied > 0) {
+      parts.add('${r.copied} copied to $albumName');
+    }
+    if (r.skipped > 0) parts.add('${r.skipped} already there (skipped)');
+    if (r.failed > 0) parts.add('${r.failed} failed');
+    return parts.isEmpty ? 'Nothing to do' : parts.join(', ');
   }
 
   // ── BULK ACTIONS (grid selection) ──
@@ -383,14 +495,17 @@ class _DeviceAlbumScreenState extends State<DeviceAlbumScreen> {
     if (chosen.isEmpty) return;
     if (!await _showConfirmDialog(p, 'డిలీట్ చేయాలా?', 'ఈ ${chosen.length} ఐటెమ్స్ గ్యాలరీ నుండి డిలీట్ చేయబడతాయి.', 'Delete')) return;
 
-    showDialog(context: context, barrierDismissible: false, builder: (_) => const Center(child: CircularProgressIndicator()));
-    await PhotoManager.editor.deleteWithIds(chosen.map((e) => e.id).toList());
-
-    if (mounted) {
-      Navigator.pop(context);
-      setState(() => _selected.clear());
-      _loadAlbumAssets();
-    }
+    final deleted = await _busy(() => _deleteIds(chosen.map((e) => e.id).toList()));
+    if (!mounted) return;
+    final gone = deleted.toSet();
+    _snack(gone.length == chosen.length
+        ? '${gone.length} deleted 🗑️'
+        : '${gone.length} of ${chosen.length} deleted');
+    setState(() {
+      _selected.clear();
+      _items.removeWhere((a) => gone.contains(a.id));
+    });
+    _loadAlbumAssets();
   }
 
   Future<void> _moveToVaultSelected(AppPalette p) async {
@@ -400,33 +515,57 @@ class _DeviceAlbumScreenState extends State<DeviceAlbumScreen> {
     if (target == null || !mounted) return;
     if (!await _showConfirmDialog(p, 'Move to Vault', 'ఈ ${chosen.length} ఫోటోలను వాల్ట్ లోకి మార్చాలా?', 'Move')) return;
 
-    _showOperationProgress('Moving to Vault');
-    final vault = VaultService();
-    final idsToDelete = <String>[];
-    int ok = 0;
-    try {
-      for (int i = 0; i < chosen.length; i++) {
+    final r = await _withProgress('Moving to Vault', () async {
+      final res = _Xfer();
+      final vault = VaultService();
+      final existing = await DatabaseHelper.instance.fetchAll();
+      final toDelete = <String>[];
+
+      for (var i = 0; i < chosen.length; i++) {
         final a = chosen[i];
-        if (await vault.hideAsset(a, target)) {
-          ok++;
-          idsToDelete.add(a.id);
+        final isDup = existing.any((e) =>
+            e.originalName == a.title && e.albumName == target && e.isDeleted == 0);
+        if (isDup) {
+          res.skipped++; // original delete cheyyam (same peru tho vere photo kavochu)
+        } else {
+          try {
+            if (await vault.hideAsset(a, target)) {
+              res.copied++;
+              toDelete.add(a.id);
+            } else {
+              res.failed++;
+            }
+          } catch (e) {
+            debugPrint('Vault hide failed for ${a.title}: $e');
+            res.failed++;
+          }
         }
         _updateOperationProgress(i + 1, chosen.length, 'Moving items');
       }
-      if (idsToDelete.isNotEmpty) {
+
+      if (toDelete.isNotEmpty) {
         _operationLabel = 'Removing originals...';
         _progressDialogSetState?.call(() {});
-        await PhotoManager.editor.deleteWithIds(idsToDelete);
+        res.deletedIds = await _deleteIds(toDelete);
       }
-    } finally {
-      _closeOperationProgress();
-    }
+      return res;
+    });
 
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$ok items moved to Vault 🔒')));
-      setState(() => _selected.clear());
-      _loadAlbumAssets();
-    }
+    if (!mounted) return;
+    final parts = <String>[];
+    if (r.deletedIds.isNotEmpty) parts.add('${r.deletedIds.length} moved to Vault 🔒');
+    final left = r.copied - r.deletedIds.length;
+    if (left > 0) parts.add('$left saved in Vault but originals NOT deleted');
+    if (r.skipped > 0) parts.add('${r.skipped} already in Vault (skipped)');
+    if (r.failed > 0) parts.add('${r.failed} failed');
+    _snack(parts.isEmpty ? 'Nothing to do' : parts.join(', '));
+
+    final gone = r.deletedIds.toSet();
+    setState(() {
+      _selected.clear();
+      _items.removeWhere((a) => gone.contains(a.id));
+    });
+    _loadAlbumAssets();
   }
 
   Future<void> _copyLocalSelected(AppPalette p) async {
@@ -435,23 +574,12 @@ class _DeviceAlbumScreenState extends State<DeviceAlbumScreen> {
     final target = await _showLocalAlbumPicker(p, 'Copy to Album');
     if (target == null || !mounted) return;
 
-    _showOperationProgress('Copying to ${target.name}');
-    int ok = 0;
-    try {
-      for (int i = 0; i < chosen.length; i++) {
-        final a = chosen[i];
-        final newAsset = await PhotoManager.editor.copyAssetToPath(asset: a, pathEntity: target);
-        if (newAsset != null) ok++;
-        _updateOperationProgress(i + 1, chosen.length, 'Copying items');
-      }
-    } finally {
-      _closeOperationProgress();
-    }
+    final r = await _withProgress('Copying to ${target.name}',
+        () => _transfer(chosen, target, move: false, label: 'Copying items'));
 
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$ok items copied to ${target.name} 📄')));
-      setState(() => _selected.clear());
-    }
+    if (!mounted) return;
+    _snack(_xferMsg(r, target.name, move: false));
+    setState(_selected.clear);
   }
 
   Future<void> _moveLocalSelected(AppPalette p) async {
@@ -461,30 +589,17 @@ class _DeviceAlbumScreenState extends State<DeviceAlbumScreen> {
     if (target == null || !mounted) return;
     if (!await _showConfirmDialog(p, 'Move Photos', 'ఈ ${chosen.length} ఐటెమ్స్ ని ${target.name} లోకి మూవ్ చేయాలా?', 'Move')) return;
 
-    _showOperationProgress('Moving to ${target.name}');
-    int ok = 0;
-    final idsToDelete = <String>[];
-    try {
-      for (int i = 0; i < chosen.length; i++) {
-        final a = chosen[i];
-        final newAsset = await PhotoManager.editor.copyAssetToPath(asset: a, pathEntity: target);
-        if (newAsset != null) { ok++; idsToDelete.add(a.id); }
-        _updateOperationProgress(i + 1, chosen.length, 'Moving items');
-      }
-      if (idsToDelete.isNotEmpty) {
-        _operationLabel = 'Removing originals...';
-        _progressDialogSetState?.call(() {});
-        await PhotoManager.editor.deleteWithIds(idsToDelete);
-      }
-    } finally {
-      _closeOperationProgress();
-    }
+    final r = await _withProgress('Moving to ${target.name}',
+        () => _transfer(chosen, target, move: true, label: 'Moving items'));
 
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$ok items moved to ${target.name} 🚀')));
-      setState(() => _selected.clear());
-      _loadAlbumAssets();
-    }
+    if (!mounted) return;
+    _snack(_xferMsg(r, target.name, move: true));
+    final gone = r.deletedIds.toSet();
+    setState(() {
+      _selected.clear();
+      _items.removeWhere((a) => gone.contains(a.id));
+    });
+    _loadAlbumAssets();
   }
 
   // ════════════════════════════════════════════════════════════════
@@ -595,7 +710,7 @@ class _DeviceAlbumScreenState extends State<DeviceAlbumScreen> {
   }
 
   Future<void> _pvDelete(AssetEntity a) async {
-    final res = await _busy(() => PhotoManager.editor.deleteWithIds([a.id]));
+    final res = await _busy(() => _deleteIds([a.id]));
     if (res.isEmpty) throw const PreviewCancelled(); // user system dialog lo deny chesadu
   }
 
@@ -603,12 +718,20 @@ class _DeviceAlbumScreenState extends State<DeviceAlbumScreen> {
     final target = await _showVaultAlbumPicker(p, 'వాల్ట్ లోకి మార్చు (Vault)');
     if (target == null || !mounted) throw const PreviewCancelled();
 
+    final existing = await DatabaseHelper.instance.fetchAll();
+    final isDup = existing.any((e) =>
+        e.originalName == a.title && e.albumName == target && e.isDeleted == 0);
+    if (isDup) {
+      _snack('Already in $target (skipped)');
+      throw const PreviewCancelled();
+    }
+
     final ok = await _busy(() => VaultService().hideAsset(a, target));
     if (!ok) {
       _snack('Vault ki move avvaledu ❌');
       throw const PreviewCancelled();
     }
-    final del = await _busy(() => PhotoManager.editor.deleteWithIds([a.id]));
+    final del = await _busy(() => _deleteIds([a.id]));
     if (del.isEmpty) {
       _snack('Vault lo save ayindi, kani original delete avvaledu');
       throw const PreviewCancelled();
@@ -620,9 +743,9 @@ class _DeviceAlbumScreenState extends State<DeviceAlbumScreen> {
     final target = await _showLocalAlbumPicker(p, 'Copy to Album');
     if (target == null || !mounted) throw const PreviewCancelled();
 
-    final n = await _busy(() => PhotoManager.editor.copyAssetToPath(asset: a, pathEntity: target));
-    if (n == null) {
-      _snack('Copy failed ❌');
+    final r = await _busy(() => _transfer([a], target, move: false, label: 'Copying'));
+    if (r.copied == 0) {
+      _snack(r.skipped > 0 ? 'Already in ${target.name} (skipped)' : 'Copy failed ❌');
       throw const PreviewCancelled();
     }
     _snack('Copied to ${target.name} 📄');
@@ -632,13 +755,16 @@ class _DeviceAlbumScreenState extends State<DeviceAlbumScreen> {
     final target = await _showLocalAlbumPicker(p, 'Move to Album');
     if (target == null || !mounted) throw const PreviewCancelled();
 
-    final n = await _busy(() => PhotoManager.editor.copyAssetToPath(asset: a, pathEntity: target));
-    if (n == null) {
+    final r = await _busy(() => _transfer([a], target, move: true, label: 'Moving'));
+    if (r.skipped > 0) {
+      _snack('Already in ${target.name} (skipped)');
+      throw const PreviewCancelled();
+    }
+    if (r.copied == 0) {
       _snack('Move failed ❌');
       throw const PreviewCancelled();
     }
-    final del = await _busy(() => PhotoManager.editor.deleteWithIds([a.id]));
-    if (del.isEmpty) {
+    if (r.deletedIds.isEmpty) {
       _snack('Copied to ${target.name}, kani original delete avvaledu');
       throw const PreviewCancelled();
     }

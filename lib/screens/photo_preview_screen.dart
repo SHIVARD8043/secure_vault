@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui';
+import 'dart:math' as math;
 
 import 'package:android_intent_plus/android_intent.dart';
 import 'package:flutter/foundation.dart';
@@ -17,6 +18,7 @@ import '../core/vault_service.dart';
 import '../db/database_helper.dart';
 import '../db/vault_item_model.dart';
 import 'video_player_screen.dart';
+import 'photo_editor_screen.dart';
 
 // ─────────────────────────────────────────────────────────────
 // MODELS
@@ -36,6 +38,7 @@ class PreviewItem {
   final void Function(BuildContext context)? onPlay;
   final Object? data; // original object (VaultItem, AssetEntity, ...)
   final bool editable; // true => rotation save + EXIF edit allowed on [file]
+  final Size? size;
 
   const PreviewItem({
     required this.id,
@@ -50,6 +53,7 @@ class PreviewItem {
     this.onPlay,
     this.data,
     this.editable = false,
+    this.size,
   });
 
   factory PreviewItem.fromVault(
@@ -280,12 +284,17 @@ class _UniversalPreviewScreenState extends State<UniversalPreviewScreen> {
   final Map<String, int> _rev = {}; // bumps when file content changes
   final Map<String, Size> _dims = {}; // decoded image size per item
   final Set<String> _dimLoading = {};
+  final Set<String> _measured = {}; // dims decoded from the real image
 
   PreviewItem get _cur => _items[_index];
 
   @override
   void initState() {
     super.initState();
+    for (final it in _items) {
+      final s = it.size;
+      if (s != null && s.width > 0 && s.height > 0) _dims[it.id] = s;
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) => _warm(_index));
   }
 
@@ -314,7 +323,7 @@ class _UniversalPreviewScreenState extends State<UniversalPreviewScreen> {
   }
 
   void _ensureDims(PreviewItem it) {
-    if (_dims.containsKey(it.id) || _dimLoading.contains(it.id)) return;
+    if (_measured.contains(it.id) || _dimLoading.contains(it.id)) return;
     _dimLoading.add(it.id);
     final stream = _provider(it).resolve(ImageConfiguration.empty);
     late ImageStreamListener l;
@@ -322,6 +331,7 @@ class _UniversalPreviewScreenState extends State<UniversalPreviewScreen> {
       (info, _) {
         _dims[it.id] =
             Size(info.image.width.toDouble(), info.image.height.toDouble());
+        _measured.add(it.id);
         _dimLoading.remove(it.id);
         stream.removeListener(l);
         if (mounted) setState(() {});
@@ -334,9 +344,20 @@ class _UniversalPreviewScreenState extends State<UniversalPreviewScreen> {
     stream.addListener(l);
   }
 
+  /// Size at which the image is displayed when "contained" in the viewport.
+  /// Using this as childSize keeps the contained scale at exactly 1.0,
+  /// so nothing jumps when real dimensions arrive.
+  Size _fitBox(Size vp, Size? dims, int q) {
+    if (dims == null || dims.isEmpty) return vp;
+    final d = q.isOdd ? Size(dims.height, dims.width) : dims;
+    final s = math.min(vp.width / d.width, vp.height / d.height);
+    return Size(d.width * s, d.height * s);
+  }
+
   void _bump(String id) {
     _rev[id] = (_rev[id] ?? 0) + 1;
     _dims.remove(id);
+    _measured.remove(id);
     _dimLoading.remove(id);
     _turns[id] = 0;
     PaintingBinding.instance.imageCache
@@ -455,6 +476,26 @@ class _UniversalPreviewScreenState extends State<UniversalPreviewScreen> {
       ));
   }
 
+  Future<void> _openEditor() async {
+    final it = _cur;
+    final f = it.file;
+    if (f == null) return;
+    final edited = await Navigator.of(context).push<File>(
+      MaterialPageRoute(builder: (_) => PhotoEditorScreen(file: f, title: it.title)),
+    );
+    if (edited == null || !mounted) return;
+    try {
+      await edited.copy(f.path); // vault original overwrite
+      if (!mounted) return;
+      setState(() => _bump(it.id));
+      _changed = true;
+      widget.onChanged?.call();
+      _toast('Edit saved');
+    } catch (_) {
+      _toast('Save cheyyalekapoyam');
+    }
+  }
+
   Future<void> _editExif() async {
     final it = _cur;
     final f = it.file;
@@ -494,6 +535,11 @@ class _UniversalPreviewScreenState extends State<UniversalPreviewScreen> {
                   Navigator.pop(ctx);
                   _showInfo();
                 }),
+                if (it.editable && it.file != null && !it.isVideo)
+                  _sheetTile(Icons.tune_rounded, 'Edit', const Color(0xFFB794FF), () {
+                    Navigator.pop(ctx);
+                    _openEditor();
+                  }),
                 if (it.editable && it.file != null && !it.isVideo)
                   _sheetTile(Icons.edit_note_rounded, 'Edit EXIF',
                       const Color(0xFFFFC857), () {
@@ -810,6 +856,7 @@ class _UniversalPreviewScreenState extends State<UniversalPreviewScreen> {
       },
       child: Scaffold(
         backgroundColor: const Color(0xFF050609),
+        resizeToAvoidBottomInset: false,
         extendBodyBehindAppBar: true,
         extendBody: true,
         body: Stack(
@@ -833,62 +880,75 @@ class _UniversalPreviewScreenState extends State<UniversalPreviewScreen> {
             GestureDetector(
               behavior: HitTestBehavior.opaque,
               onTap: () => setState(() => _chrome = !_chrome),
-              child: PhotoViewGallery.builder(
-                pageController: _pc,
-                itemCount: _items.length,
-                scrollPhysics: const BouncingScrollPhysics(),
-                onPageChanged: (i) {
-                  setState(() => _index = i);
-                  _warm(i);
-                },
-                backgroundDecoration:
-                    const BoxDecoration(color: Colors.transparent),
-                builder: (_, i) {
-                  final it = _items[i];
-                  final rev = _rev[it.id] ?? 0;
-                  final dims = _dims[it.id];
-                  if (dims == null) {
-                    WidgetsBinding.instance
-                        .addPostFrameCallback((_) => _ensureDims(it));
-                  }
-                  final q = _quarterTurns(it);
-                  final base = dims ?? media.size;
-                  final box = q.isOdd ? Size(base.height, base.width) : base;
+              child: LayoutBuilder(
+                builder: (context, c) {
+                  final vp = c.biggest;
+                  return PhotoViewGallery.builder(
+                    pageController: _pc,
+                    itemCount: _items.length,
+                    scrollPhysics: const BouncingScrollPhysics(),
+                    onPageChanged: (i) {
+                      setState(() => _index = i);
+                      _warm(i);
+                    },
+                    backgroundDecoration:
+                        const BoxDecoration(color: Colors.transparent),
+                    builder: (_, i) {
+                      final it = _items[i];
+                      final rev = _rev[it.id] ?? 0;
+                      if (!_measured.contains(it.id)) {
+                        WidgetsBinding.instance
+                            .addPostFrameCallback((_) => _ensureDims(it));
+                      }
+                      final q = _quarterTurns(it);
+                      final box = _fitBox(vp, _dims[it.id], q);
 
-                  return PhotoViewGalleryPageOptions.customChild(
-                    childSize: box,
-                    initialScale: PhotoViewComputedScale.contained,
-                    minScale: PhotoViewComputedScale.contained,
-                    maxScale: PhotoViewComputedScale.covered * 3,
-                    heroAttributes: PhotoViewHeroAttributes(tag: it.heroTag),
-                    child: RepaintBoundary(
-                      child: SizedBox(
-                        width: box.width,
-                        height: box.height,
-                        child: RotatedBox(
-                          quarterTurns: q,
-                          child: Image(
-                            key: ValueKey('${it.id}#$rev'),
-                            image: _provider(it),
-                            fit: BoxFit.contain,
-                            gaplessPlayback: true,
-                            filterQuality: FilterQuality.medium,
-                            errorBuilder: (_, __, ___) => const Center(
-                              child: Icon(
-                                Icons.broken_image_outlined,
-                                color: Colors.white54,
-                                size: 54,
+                      return PhotoViewGalleryPageOptions.customChild(
+                        childSize: box,
+                        initialScale: PhotoViewComputedScale.contained,
+                        minScale: PhotoViewComputedScale.contained,
+                        maxScale: PhotoViewComputedScale.covered * 3,
+                        heroAttributes:
+                            PhotoViewHeroAttributes(tag: it.heroTag),
+                        child: RepaintBoundary(
+                          child: SizedBox(
+                            width: box.width,
+                            height: box.height,
+                            child: RotatedBox(
+                              quarterTurns: q,
+                              child: Image(
+                                key: ValueKey('${it.id}#$rev'),
+                                image: _provider(it),
+                                fit: BoxFit.contain,
+                                gaplessPlayback: true,
+                                filterQuality: FilterQuality.medium,
+                                frameBuilder: (ctx, child, frame, sync) =>
+                                    sync
+                                        ? child
+                                        : AnimatedOpacity(
+                                            opacity: frame == null ? 0 : 1,
+                                            duration: const Duration(
+                                                milliseconds: 180),
+                                            child: child,
+                                          ),
+                                errorBuilder: (_, __, ___) => const Center(
+                                  child: Icon(
+                                    Icons.broken_image_outlined,
+                                    color: Colors.white54,
+                                    size: 54,
+                                  ),
+                                ),
                               ),
                             ),
                           ),
                         ),
-                      ),
-                    ),
+                      );
+                    },
                   );
                 },
               ),
             ),
-
+            
             if (item.isVideo && item.onPlay != null)
               Center(
                 child: GestureDetector(

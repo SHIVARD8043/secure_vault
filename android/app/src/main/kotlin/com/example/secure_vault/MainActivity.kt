@@ -8,7 +8,7 @@ import android.os.Build
 import android.provider.MediaStore
 import androidx.annotation.RequiresApi
 import androidx.exifinterface.media.ExifInterface
-import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -18,9 +18,9 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-class MainActivity : FlutterActivity() {
+class MainActivity : FlutterFragmentActivity() {
 
-    private var pendingMetadataResult: MethodChannel.Result? = null
+    private var pendingMetadataResult: MethodChannel.Result? = null    
     private var pendingMetadataUri: Uri? = null
     private var pendingTakenMs: Long = 0L
     private var pendingModifiedMs: Long = 0L

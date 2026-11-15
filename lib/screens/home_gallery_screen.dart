@@ -15,12 +15,14 @@ import 'package:image_cropper/image_cropper.dart';
 import '../core/vault_service.dart';
 import '../core/theme_provider.dart';
 import '../core/taken_store.dart'; // 👈 1. TakenStore ని ఇంపోర్ట్ చేశాం
+import '../core/vault_lock.dart';
 import '../db/database_helper.dart';
 import 'albums_screen.dart';
 import 'home_preview_screen.dart';
 import 'video_player_screen.dart';
 import 'device_album_screen.dart';
 import 'photo_preview_screen.dart';
+import 'photo_editor_screen.dart';
 
 // ════════════════════════════════════════════════════════════════════
 //  PALETTE, GLASS WIDGET & SHARED BUTTONS
@@ -825,6 +827,7 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
         );
       },
       data: a,
+            size: Size(a.orientatedWidth.toDouble(), a.orientatedHeight.toDouble()),
     );
   }
 
@@ -874,6 +877,14 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
         removesItem: false,
         modifiesFile: true,
         run: (i) => _pvCropRotate(i.data as AssetEntity),
+      ),
+      PreviewAction(
+        icon: Icons.tune_rounded,
+        label: 'Edit',
+        color: const Color(0xFFB794FF),
+        inDock: false,
+        removesItem: false,
+        run: (i) => _pvEdit(i.data as AssetEntity),
       ),
     ];
   }
@@ -941,6 +952,28 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
     }
     if (!ok) throw const PreviewCancelled();
     _snack('Moved to Vault Bin 🗑️');
+  }
+
+    /// Original ni touch cheyyakunda edit ni NEW COPY ga save chestundi.
+  Future<void> _pvEdit(AssetEntity a) async {
+    if (a.type == AssetType.video) {
+      _snack('Videos ki edit ledu');
+      throw const PreviewCancelled();
+    }
+    final f = await a.originFile;
+    if (f == null || !mounted) throw const PreviewCancelled();
+
+    final edited = await Navigator.of(context).push<File>(
+      MaterialPageRoute(builder: (_) => PhotoEditorScreen(file: f, title: a.title)),
+    );
+    if (edited == null) throw const PreviewCancelled();
+
+    final ext = edited.path.split('.').last;
+    await PhotoManager.editor.saveImageWithPath(
+      edited.path,
+      title: 'edit_${DateTime.now().millisecondsSinceEpoch}.$ext',
+    );
+    _snack('Saved as a new copy ✨');
   }
 
   /// Device gallery originals ni overwrite cheyyakunda, edit ni NEW COPY ga save chestundi.
@@ -1704,88 +1737,13 @@ class _HomeGalleryScreenState extends State<HomeGalleryScreen> with TickerProvid
   }
 
   Future<void> _openVaultSecurely() async {
-    HapticFeedback.heavyImpact(); 
-    final sp = await SharedPreferences.getInstance();
-    final storedKey = sp.getString('vault_secret_key'); 
+    HapticFeedback.heavyImpact();
     final p = _pal;
-    final ctrl = TextEditingController();
-    String error = '';
-
-    final res = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setDialogState) {
-          return AlertDialog(
-            backgroundColor: p.surface,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-            title: Text(
-              storedKey == null ? 'Set Secret Key' : 'Enter Secret Key', 
-              style: TextStyle(color: p.text, fontWeight: FontWeight.bold), 
-              textAlign: TextAlign.center
-            ),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextField(
-                  controller: ctrl,
-                  keyboardType: TextInputType.text, 
-                  obscureText: true,
-                  autofocus: true,
-                  style: TextStyle(color: p.accent, fontSize: 24, letterSpacing: 4, fontWeight: FontWeight.bold),
-                  textAlign: TextAlign.center,
-                  decoration: InputDecoration(
-                    hintText: 'A-Z, 0-9 allowed',
-                    hintStyle: TextStyle(color: p.sub.withValues(alpha: 0.5), fontSize: 13, letterSpacing: 0),
-                    enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: p.border)),
-                    focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: p.accent, width: 2)),
-                  ),
-                  onChanged: (v) {
-                    if (error.isNotEmpty) setDialogState(() => error = '');
-                  },
-                ),
-                if (error.isNotEmpty) ...[
-                  const SizedBox(height: 12),
-                  Text(error, style: const TextStyle(color: Colors.redAccent, fontSize: 13, fontWeight: FontWeight.bold)),
-                ]
-              ],
-            ),
-            actionsAlignment: MainAxisAlignment.spaceEvenly,
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(ctx, false), 
-                child: Text('Cancel', style: TextStyle(color: p.sub))
-              ),
-              TextButton(
-                onPressed: () async {
-                  final val = ctrl.text.trim();
-                  if (val.length < 6) {
-                    setDialogState(() => error = 'Minimum 6 characters required');
-                    return;
-                  }
-                  
-                  if (storedKey == null) {
-                    await sp.setString('vault_secret_key', val); 
-                    Navigator.pop(ctx, true);
-                  } else {
-                    if (val == storedKey) {
-                      Navigator.pop(ctx, true); 
-                    } else {
-                      setDialogState(() => error = 'Incorrect Key ❌');
-                    }
-                  }
-                },
-                child: Text(
-                  storedKey == null ? 'Set Key' : 'Unlock', 
-                  style: TextStyle(color: p.accent, fontWeight: FontWeight.bold, fontSize: 16)
-                ),
-              ),
-            ],
-          );
-        }
-      )
+    final ok = await VaultLock.instance.unlock(
+      context,
+      LockColors(surface: p.surface, text: p.text, sub: p.sub, accent: p.accent, border: p.border),
     );
-
-    if (res == true && mounted) {
+    if (ok && mounted) {
       await Navigator.push(context, MaterialPageRoute(builder: (_) => const AlbumsScreen()));
     }
   }

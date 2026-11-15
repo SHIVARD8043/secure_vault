@@ -10,6 +10,7 @@ import 'package:sqflite/sqflite.dart';
 import '../core/theme_provider.dart'; // Theme Provider
 import '../core/backup_service.dart';
 import '../core/vault_service.dart';
+import '../core/vault_lock.dart';
 import '../db/database_helper.dart';
 import '../db/vault_queries.dart';
 import 'album_view_screen.dart';
@@ -209,6 +210,98 @@ class _AlbumsScreenState extends State<AlbumsScreen> {
       });
     }
   }
+
+  // ─── VAULT SETTINGS (Security + Albums) ───
+  Future<void> _showVaultSettings(AppPalette p) async {
+    final lock = VaultLock.instance;
+    final c = LockColors(surface: p.surface, text: p.text, sub: p.sub, accent: p.accent, border: p.border);
+    var bioOn = await lock.biometricEnabled();
+    final bioAvail = await lock.biometricAvailable();
+    if (!mounted) return;
+
+    void snack(String m) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
+    }
+
+    Widget label(String t) => Padding(
+          padding: const EdgeInsets.only(top: 6, bottom: 6),
+          child: Text(t, style: TextStyle(color: p.sub, fontSize: 11, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
+        );
+
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: p.surface,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setS) => SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(24, 22, 24, 24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Vault Settings', style: TextStyle(color: p.text, fontSize: 22, fontWeight: FontWeight.w800)),
+                const SizedBox(height: 18),
+
+                label('SECURITY'),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(Icons.password_rounded, color: p.accent, size: 26),
+                  title: Text('Change secret key', style: TextStyle(color: p.text, fontSize: 15, fontWeight: FontWeight.w600)),
+                  trailing: Icon(Icons.chevron_right_rounded, color: p.sub),
+                  onTap: () async {
+                    final ok = await lock.changePassword(ctx, c);
+                    if (ok) snack('Secret key changed ✅');
+                  },
+                ),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  secondary: Icon(Icons.fingerprint_rounded, color: bioAvail ? p.accent : p.sub, size: 28),
+                  title: Text('Biometric unlock', style: TextStyle(color: p.text, fontSize: 15, fontWeight: FontWeight.w600)),
+                  subtitle: Text(
+                    bioAvail ? 'Fingerprint / face to open vault' : 'No biometric enrolled on this device',
+                    style: TextStyle(color: p.sub, fontSize: 12),
+                  ),
+                  value: bioOn,
+                  activeColor: p.accent,
+                  onChanged: bioAvail
+                      ? (v) async {
+                          if (v) {
+                            final ok = await lock.enableBiometric();
+                            if (ok) {
+                              setS(() => bioOn = true);
+                            } else {
+                              snack('Biometric verify avvaledu');
+                            }
+                          } else {
+                            await lock.setBiometric(false);
+                            setS(() => bioOn = false);
+                          }
+                        }
+                      : null,
+                ),
+
+                const Divider(height: 28),
+                label('ALBUMS'),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(Icons.tune_rounded, color: p.accent, size: 26),
+                  title: Text('Album covers & sorting', style: TextStyle(color: p.text, fontSize: 15, fontWeight: FontWeight.w600)),
+                  trailing: Icon(Icons.chevron_right_rounded, color: p.sub),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _showAlbumSettings(p);
+                  },
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
 
   // ─── ALBUM DISPLAY SETTINGS ───
   Future<void> _showAlbumSettings(AppPalette p) async {
@@ -786,11 +879,10 @@ Future<void> _createNewAlbum(AppPalette p) async {
                                   IconButton(icon: Icon(Icons.arrow_back_ios_new_rounded, color: p.text, size: 20), onPressed: () => Navigator.pop(context)),
                                   Expanded(child: Text('Secure Vault', style: TextStyle(color: p.text, fontSize: 20, fontWeight: FontWeight.bold, letterSpacing: -0.5))),
                                   
-                                  // Album covers + sorting settings
                                   IconButton(
-                                    tooltip: 'Album settings',
-                                    icon: Icon(Icons.tune_rounded, color: p.text),
-                                    onPressed: () => _showAlbumSettings(p),
+                                    tooltip: 'Vault settings',
+                                    icon: Icon(Icons.settings_rounded, color: p.text),
+                                    onPressed: () => _showVaultSettings(p),
                                   ),
 
                                   // Duplicate Finder: compare Gallery and Vault files.
